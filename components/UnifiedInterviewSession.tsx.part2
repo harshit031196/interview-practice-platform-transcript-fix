@@ -1,0 +1,124 @@
+  // Effect to handle interview completion and redirection
+  useEffect(() => {
+    if (isInterviewFlowCompleted) {
+      console.log('Interview flow complete, calling onComplete...');
+      onComplete?.({
+        sessionId,
+        status: 'processing',
+        hasVideo: !!recordedBlob,
+        hasConversation: isConversational && messages.length > 0,
+        messages: isConversational ? messages : []
+      });
+    }
+  }, [isInterviewFlowCompleted, onComplete, sessionId, recordedBlob, isConversational, messages]);
+
+  // Format time display
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const startInterview = useCallback(() => {
+    if (isRecording) return;
+    console.log('🚀 [Interview] User clicked start. Preparing stream...');
+    setIsPreparingStream(true);
+    setInterviewStarted(true); // Render video element immediately
+  }, [isRecording]);
+
+  useEffect(() => {
+    if (!isPreparingStream || !videoRef.current) return;
+
+    let stream: MediaStream;
+
+    const setupStream = async () => {
+      console.log('▶️ [Video] useEffect triggered. videoRef is available.');
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+          audio: { sampleRate: 48000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+        });
+
+        streamRef.current = stream;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+
+        console.log('▶️ [Video] Stream attached and playing successfully.');
+        setIsStreamReady(true);
+        setTimerActive(true);
+        startFrameAnalysis();
+
+        if (isConversational) {
+          console.log('🤖 [AI] Fetching initial question...');
+          const response = await fetch('/api/ai/interviewer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ interviewType, difficulty, history: [] }),
+          });
+          if (!response.ok) throw new Error('Failed to get initial question');
+          const data = await response.json();
+          setMessages([{ role: 'assistant', content: data.question }]);
+          setCurrentQuestion(data.question);
+        }
+      } catch (error) {
+        console.error('❌ [Video] Error in stream setup:', error);
+        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+          alert('Camera and microphone access is required. Please enable permissions and restart.');
+        }
+        setInterviewStarted(false); // Reset on error
+      }
+    };
+
+    setupStream();
+
+    return () => {
+      // Cleanup stream on component unmount or re-run
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [isPreparingStream]); // Reruns only when isPreparingStream changes
+
+  // Start recording
+  const startRecording = useCallback(async () => {
+    if (!streamRef.current) return;
+
+    try {
+      const mediaRecorder = new MediaRecorder(streamRef.current, {
+        mimeType: 'video/webm;codecs=vp9,opus'
+      });
+      
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        setRecordedBlob(blob);
+        setVideoUrl(URL.createObjectURL(blob));
+        // Automatically end the interview to process the final recording
+        handleEndInterview();
+      };
+
+      mediaRecorder.start(1000); // Record in 1-second chunks
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Failed to start recording:', error);
+    }
+  }, []);
+
+  // Stop recording
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (videoRef.current) {
+        videoRef.current.pause();
+      }
+    }
+  }, [isRecording]);

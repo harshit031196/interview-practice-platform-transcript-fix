@@ -1,0 +1,186 @@
+  return (
+    <div className="flex flex-col gap-4 w-full max-w-5xl mx-auto">
+      {/* Interview Header */}
+      <div className="flex justify-between items-center">
+        <div>
+          <h2 className="text-2xl font-bold">{interviewType} Interview</h2>
+          <div className="flex gap-2 mt-1">
+            <Badge variant="outline">{difficulty}</Badge>
+            <Badge variant="outline">{isConversational ? 'Conversational' : 'Traditional'}</Badge>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="text-3xl font-mono">{formatTime(timeRemaining)}</div>
+          <div className="text-sm text-muted-foreground">Time Remaining</div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Video Feed */}
+        <Card className="overflow-hidden">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex justify-between items-center">
+              <span>Video Feed</span>
+              {interviewStarted && (
+                <Badge variant={isRecording ? "destructive" : "outline"} className="ml-2">
+                  {isRecording ? 'Recording' : 'Ready'}
+                </Badge>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="relative aspect-video bg-black rounded-md overflow-hidden">
+              {!interviewStarted ? (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Button 
+                    onClick={startInterview} 
+                    disabled={isProcessing}
+                    className="flex items-center gap-2"
+                  >
+                    <Play className="h-4 w-4" />
+                    Start Interview
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <video 
+                    ref={videoRef} 
+                    className={`w-full h-full object-cover ${!isStreamReady ? 'invisible' : 'visible'}`}
+                    autoPlay 
+                    playsInline
+                    muted
+                  />
+                  {!isStreamReady && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
+                      <p className="text-white">Preparing video stream...</p>
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 right-2 flex gap-2">
+                    {isRecording ? (
+                      <Button 
+                        size="sm" 
+                        variant="destructive" 
+                        onClick={stopRecording}
+                        disabled={isProcessing}
+                      >
+                        <Square className="h-4 w-4 mr-1" />
+                        Stop
+                      </Button>
+                    ) : (
+                      <Button 
+                        size="sm" 
+                        variant="default" 
+                        onClick={startRecording}
+                        disabled={isProcessing || !interviewStarted}
+                      >
+                        <Mic className="h-4 w-4 mr-1" />
+                        Record
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+            
+            {/* Controls */}
+            {interviewStarted && !isAnalyzing && (
+              <div className="mt-4 flex justify-between">
+                <Button 
+                  variant="outline" 
+                  onClick={() => {
+                    if (videoRef.current) {
+                      videoRef.current.srcObject = null;
+                    }
+                    if (streamRef.current) {
+                      streamRef.current.getTracks().forEach(track => track.stop());
+                    }
+                    setInterviewStarted(false);
+                    setTimerActive(false);
+                    setIsStreamReady(false);
+                    setIsPreparingStream(false);
+                  }}
+                  disabled={isProcessing || isRecording}
+                >
+                  Restart
+                </Button>
+                <Button 
+                  variant="default" 
+                  onClick={handleEndInterview}
+                  disabled={isProcessing || isRecording}
+                >
+                  End Interview
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Conversation / Instructions */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle>
+              {isConversational ? 'Conversation' : 'Instructions'}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {isConversational ? (
+              <div className="flex flex-col gap-4 h-[350px] overflow-y-auto">
+                {messages.map((message, index) => (
+                  <div 
+                    key={index} 
+                    className={`p-3 rounded-lg ${
+                      message.role === 'assistant' 
+                        ? 'bg-primary/10 text-primary-foreground' 
+                        : 'bg-muted text-muted-foreground'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      {message.role === 'assistant' ? (
+                        <Brain className="h-4 w-4" />
+                      ) : (
+                        <MessageCircle className="h-4 w-4" />
+                      )}
+                      <span className="text-xs font-medium">
+                        {message.role === 'assistant' ? 'Interviewer' : 'You'}
+                      </span>
+                    </div>
+                    <div>{message.content}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                <p>This is a traditional interview session. Please:</p>
+                <ol className="list-decimal pl-5 space-y-2">
+                  <li>Click "Start Interview" to begin</li>
+                  <li>Click "Record" when you're ready to answer</li>
+                  <li>Click "Stop" when you've finished your response</li>
+                  <li>Click "End Interview" when you're done</li>
+                </ol>
+                <p className="text-sm text-muted-foreground mt-4">
+                  Your video will be analyzed and feedback will be provided after the interview.
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Analysis Status */}
+      {isAnalyzing && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle>Analysis Progress</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Progress value={isInterviewFlowCompleted ? 100 : 50} className="mb-2" />
+            <p className="text-sm text-muted-foreground">{analysisProgress}</p>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+export default UnifiedInterviewSession;

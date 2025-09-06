@@ -1,0 +1,19 @@
+version: '3.8'
+
+# Note: This docker-compose.yml is now for local development only
+# Production uses Google Cloud SQL PostgreSQL instance
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: wingman_interview
+      POSTGRES_USER: wingman_user
+      POSTGRES_PASSWORD: WingmanSecure2024!
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

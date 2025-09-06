@@ -1,0 +1,88 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Interview Platform Console Monitor</title>
+  <script>
+    // Override console methods to send logs to server
+    const originalConsole = {
+      log: console.log,
+      error: console.error,
+      warn: console.warn,
+      info: console.info
+    };
+    
+    function sendLog(type, args) {
+      const logData = Array.from(args).map(arg => {
+        if (typeof arg === 'object') {
+          try {
+            return JSON.stringify(arg);
+          } catch (e) {
+            return String(arg);
+          }
+        }
+        return String(arg);
+      }).join(' ');
+      
+      fetch('/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, data: logData })
+      }).catch(e => {});
+      
+      // Also call original console method
+      originalConsole[type].apply(console, args);
+    }
+    
+    console.log = function() { sendLog('log', arguments); };
+    console.error = function() { sendLog('error', arguments); };
+    console.warn = function() { sendLog('warn', arguments); };
+    console.info = function() { sendLog('info', arguments); };
+    
+    // Monitor network requests
+    const originalFetch = window.fetch;
+    window.fetch = function() {
+      const url = arguments[0];
+      const options = arguments[1] || {};
+      
+      console.log('Fetch request:', url, options.method || 'GET');
+      
+      return originalFetch.apply(window, arguments)
+        .then(response => {
+          console.log('Fetch response:', url, response.status);
+          return response;
+        })
+        .catch(error => {
+          console.error('Fetch error:', url, error);
+          throw error;
+        });
+    };
+    
+    // Monitor XHR requests
+    const originalXHROpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function() {
+      const method = arguments[0];
+      const url = arguments[1];
+      
+      console.log('XHR request:', url, method);
+      
+      this.addEventListener('load', function() {
+        console.log('XHR response:', url, this.status);
+      });
+      
+      this.addEventListener('error', function() {
+        console.error('XHR error:', url);
+      });
+      
+      return originalXHROpen.apply(this, arguments);
+    };
+  </script>
+</head>
+<body>
+  <h1>Interview Platform Console Monitor</h1>
+  <p>This page is monitoring console logs from the interview platform.</p>
+  <p>Open the interview platform in another tab to see logs here.</p>
+  <div id="logs"></div>
+</body>
+</html>
+  

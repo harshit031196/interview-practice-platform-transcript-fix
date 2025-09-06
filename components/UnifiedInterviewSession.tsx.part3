@@ -1,0 +1,108 @@
+  // Process conversational response
+  const processConversationalResponse = useCallback(async (videoBlob: Blob) => {
+    setIsProcessing(true);
+    try {
+      console.log('Processing conversational response, blob size:', videoBlob.size);
+      
+      // Create FormData for direct upload to speech API
+      const formData = new FormData();
+      formData.append('audio', videoBlob, `response_${Date.now()}.webm`);
+      formData.append('sessionId', sessionId);
+      formData.append('enableDiarization', 'true');
+      
+      // Send to speech-to-text API
+      const speechResponse = await fetch('/api/ai/speech-stream', {
+        method: 'POST',
+        body: formData // Send as FormData instead of JSON
+      });
+
+      if (speechResponse.ok) {
+        const speechData = await speechResponse.json();
+        console.log('Speech response:', speechData);
+        
+        let userTranscript = '';
+        if (speechData.transcripts && speechData.transcripts.length > 0) {
+          userTranscript = speechData.transcripts
+            .map((t: any) => t.text || t.transcript || '')
+            .join(' ')
+            .trim();
+        } else if (speechData.transcript) {
+          userTranscript = speechData.transcript.trim();
+        }
+
+        console.log('User transcript:', userTranscript);
+
+        if (userTranscript) {
+          // Add user message
+          const userMessage: Message = {
+            role: 'user',
+            content: userTranscript,
+            timestamp: new Date(),
+            speakerSegments: speechData.speakerSegments
+          };
+
+          setMessages(prev => {
+            const newMessages = [...prev, userMessage];
+            console.log('Updated messages:', newMessages);
+            return newMessages;
+          });
+
+          // Get AI response
+          const aiResponse = await fetch('/api/ai/interviewer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userResponse: userTranscript,
+              conversationHistory: [...messages, userMessage].map(m => ({
+                role: m.role,
+                content: m.content
+              })),
+              sessionId,
+              jobRole: 'Software Engineer',
+              company: 'FAANG',
+              interviewType
+            })
+          });
+
+          if (aiResponse.ok) {
+            const aiData = await aiResponse.json();
+            console.log('AI response:', aiData);
+            setCurrentQuestion(aiData.question);
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              content: aiData.question,
+              timestamp: new Date()
+            }]);
+          } else {
+            console.error('AI response failed:', aiResponse.status, await aiResponse.text());
+          }
+        } else {
+          console.warn('No transcript received from speech API');
+          // Show error message instead of prompt
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: 'I had trouble processing your audio response. Please try speaking again or click "End Interview" if you\'re finished.',
+            timestamp: new Date()
+          }]);
+        }
+      } else {
+        console.error('Speech API failed:', speechResponse.status, await speechResponse.text());
+        // Show error in conversation instead of alert
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'I had trouble processing your audio. Please try recording your response again, or click "End Interview" if you\'re ready to finish.',
+          timestamp: new Date()
+        }]);
+      }
+    } catch (error) {
+      console.error('Failed to process conversational response:', error);
+      // Show error in conversation instead of alert
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'I encountered an error processing your response. Please try again or click "End Interview" to finish.',
+        timestamp: new Date()
+      }]);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [messages, sessionId, interviewType]);

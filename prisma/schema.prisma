@@ -1,0 +1,366 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  jwtTokenId   String?
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model User {
+  id                    String              @id @default(cuid())
+  email                 String              @unique
+  passwordHash          String?
+  name                  String
+  role                  UserRole
+  linkedinUrl           String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  accounts              Account[]
+  sessions              Session[]
+  bookingsAsInterviewee Booking[]           @relation("IntervieweeBooking")
+  bookingsAsInterviewer Booking[]           @relation("InterviewerBooking")
+  intervieweeSessions   InterviewSession[]  @relation("IntervieweeSession")
+  interviewerSessions   InterviewSession[]  @relation("InterviewerSession")
+  intervieweeProfile    IntervieweeProfile?
+  interviewerProfile    InterviewerProfile?
+  jds                   JD[]
+  sentMessages          Message[]           @relation("SentMessages")
+  receivedMessages      Message[]           @relation("ReceivedMessages")
+  peerMatchOptIn        PeerMatchOptIn?
+  speechAnalysisJobs    SpeechAnalysisJob[]
+  videoAnalyses         VideoAnalysis[]
+
+  @@map("users")
+}
+
+model IntervieweeProfile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  currentRole    String
+  yearsExp       Int
+  industry       String
+  skills         Json
+  targetRoles    String[]
+  credits        Int      @default(100)
+  readinessScore Int      @default(0)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("interviewee_profiles")
+}
+
+model InterviewerProfile {
+  id                 String             @id @default(cuid())
+  userId             String             @unique
+  bio                String
+  expertiseTags      String[]
+  yearsExp           Int
+  verified           Boolean            @default(false)
+  verificationStatus VerificationStatus @default(PENDING)
+  calendarProvider   CalendarProvider   @default(NONE)
+  rateCents          Int?
+  availabilitySlots  AvailabilitySlot[]
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("interviewer_profiles")
+}
+
+model JD {
+  id        String             @id @default(cuid())
+  userId    String
+  title     String
+  rawText   String
+  keywords  String[]
+  createdAt DateTime           @default(now())
+  sessions  InterviewSession[]
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("job_descriptions")
+}
+
+model InterviewSession {
+  id               String                @id @default(cuid())
+  type             SessionType
+  status           SessionStatus         @default(SCHEDULED)
+  intervieweeId    String
+  interviewerId    String?
+  jdId             String?
+  interviewType    String?
+  difficulty       String?
+  duration         Int?
+  isConversational Boolean?              @default(false)
+  startedAt        DateTime?
+  endedAt          DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  booking          Booking?
+  feedback         InterviewFeedback?
+  interviewee      User                  @relation("IntervieweeSession", fields: [intervieweeId], references: [id], onDelete: Cascade)
+  interviewer      User?                 @relation("InterviewerSession", fields: [interviewerId], references: [id])
+  jd               JD?                   @relation(fields: [jdId], references: [id])
+  recording        Recording?
+  report           Report?
+  transcriptItems  TranscriptItem[]
+  videoAnalyses    VideoAnalysis[]
+  visionFrames     VisionAnalysisFrame[]
+
+  @@map("interview_sessions")
+}
+
+model Booking {
+  id            String           @id @default(cuid())
+  interviewerId String
+  intervieweeId String
+  sessionId     String           @unique
+  start         DateTime
+  end           DateTime
+  notes         String?
+  status        BookingStatus    @default(PENDING)
+  createdAt     DateTime         @default(now())
+  interviewee   User             @relation("IntervieweeBooking", fields: [intervieweeId], references: [id], onDelete: Cascade)
+  interviewer   User             @relation("InterviewerBooking", fields: [interviewerId], references: [id], onDelete: Cascade)
+  session       InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("bookings")
+}
+
+model Report {
+  id           String           @id @default(cuid())
+  sessionId    String           @unique
+  overall      Float
+  jdCoverage   JDCoverage
+  strengths    String[]
+  improvements String[]
+  actions      Json
+  charts       Json
+  createdAt    DateTime         @default(now())
+  grade        String?          @default("N/A")
+  session      InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("reports")
+}
+
+model TranscriptItem {
+  id        String           @id @default(cuid())
+  sessionId String
+  t         Float
+  speaker   Speaker
+  text      String
+  labels    String[]
+  createdAt DateTime         @default(now())
+  session   InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("transcript_items")
+}
+
+model Recording {
+  id          String           @id @default(cuid())
+  sessionId   String           @unique
+  url         String
+  durationSec Int
+  consent     Boolean
+  session     InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("recordings")
+}
+
+model AvailabilitySlot {
+  id            String             @id @default(cuid())
+  interviewerId String
+  start         DateTime
+  end           DateTime
+  isRecurring   Boolean            @default(false)
+  interviewer   InterviewerProfile @relation(fields: [interviewerId], references: [id], onDelete: Cascade)
+
+  @@map("availability_slots")
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  fromUserId String
+  toUserId   String
+  text       String
+  createdAt  DateTime @default(now())
+  fromUser   User     @relation("SentMessages", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser     User     @relation("ReceivedMessages", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@map("messages")
+}
+
+model ContentItem {
+  id    String   @id @default(cuid())
+  title String
+  url   String
+  tags  String[]
+
+  @@map("content_items")
+}
+
+model PeerMatchOptIn {
+  id       String  @id @default(cuid())
+  userId   String  @unique
+  active   Boolean @default(true)
+  role     String
+  timezone String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("peer_match_opt_ins")
+}
+
+model InterviewFeedback {
+  id                 String           @id @default(cuid())
+  sessionId          String           @unique
+  transcript         String
+  speakingPaceWpm    Int
+  fillerWordCount    Int
+  clarityScore       Float
+  emotionTimeline    String
+  contentFeedback    String
+  processingMetadata String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  session            InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("interview_feedback")
+}
+
+model VideoAnalysis {
+  id           String           @id @default(cuid())
+  sessionId    String
+  userId       String
+  results      String
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  segmentIndex Int
+  session      InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, segmentIndex])
+  @@map("video_analysis")
+}
+
+model VisionAnalysisFrame {
+  id                 String           @id @default(cuid())
+  sessionId          String
+  timestamp          DateTime
+  joyLikelihood      Int
+  sorrowLikelihood   Int
+  angerLikelihood    Int
+  surpriseLikelihood Int
+  eyeContact         Boolean
+  confidence         Float
+  createdAt          DateTime         @default(now())
+  session            InterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("vision_analysis_frames")
+}
+
+model SpeechAnalysisJob {
+  id             String               @id @default(cuid())
+  interviewId    String
+  userId         String
+  status         SpeechAnalysisStatus @default(QUEUED)
+  filename       String
+  fileSize       Int
+  operationName  String?
+  transcript     String?
+  confidence     Float?
+  errorMessage   String?
+  startTime      DateTime
+  completionTime DateTime?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  user           User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("speech_analysis_jobs")
+}
+
+enum UserRole {
+  INTERVIEWEE
+  INTERVIEWER
+  BOTH
+}
+
+enum SessionType {
+  AI
+  HUMAN
+  PEER
+}
+
+enum SessionStatus {
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum JDCoverage {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum Speaker {
+  AI
+  HUMAN
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum CalendarProvider {
+  NONE
+  GOOGLE
+  MICROSOFT
+}
+
+enum SpeechAnalysisStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}

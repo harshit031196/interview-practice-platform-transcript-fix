@@ -1,0 +1,8 @@
+google-cloud-storage==2.10.0
+google-cloud-speech==2.21.0
+google-cloud-videointelligence==2.11.4
+google-cloud-aiplatform==1.38.0
+vertexai==1.38.0
+functions-framework==3.5.0
+requests==2.31.0
+ffmpeg-python==0.2.0

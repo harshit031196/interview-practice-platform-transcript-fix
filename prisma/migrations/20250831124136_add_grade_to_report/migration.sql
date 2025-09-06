@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "reports" ADD COLUMN     "grade" TEXT DEFAULT 'N/A',
+ALTER COLUMN "overall" SET DATA TYPE DOUBLE PRECISION;

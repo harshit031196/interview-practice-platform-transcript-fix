@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Analysis API Monitor</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f5f5f7;
+      color: #333;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #0066cc;
+      margin-bottom: 10px;
+    }
+    .dashboard {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .panel {
+      background-color: white;
+      border-radius: 10px;
+      padding: 15px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+    .panel h2 {
+      margin-top: 0;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+      color: #333;
+    }
+    .controls {
+      margin-bottom: 20px;
+      padding: 15px;
+      background-color: white;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+    button {
+      background-color: #0066cc;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-right: 10px;
+      font-size: 14px;
+    }
+    button:hover {
+      background-color: #004499;
+    }
+    button.danger {
+      background-color: #cc3300;
+    }
+    button.danger:hover {
+      background-color: #aa2200;
+    }
+    button.success {
+      background-color: #33cc66;
+    }
+    button.success:hover {
+      background-color: #22aa44;
+    }
+    .log-entry {
+      margin-bottom: 8px;
+      padding: 8px;
+      border-radius: 5px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-entry.request {
+      background-color: #e6f2ff;
+      border-left: 4px solid #0066cc;
+    }
+    .log-entry.response {
+      background-color: #e6ffe6;
+      border-left: 4px solid #33cc66;
+    }
+    .log-entry.error {
+      background-color: #ffe6e6;
+      border-left: 4px solid #cc3300;
+    }
+    .log-entry.info {
+      background-color: #f2f2f2;
+      border-left: 4px solid #666;
+    }
+    .status {
+      display: inline-block;
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-size: 12px;
+      font-weight: bold;
+      color: white;
+    }
+    .status.success {
+      background-color: #33cc66;
+    }
+    .status.error {
+      background-color: #cc3300;
+    }
+    .status.pending {
+      background-color: #ff9900;
+    }
+    .filter-controls {
+      margin-bottom: 10px;
+    }
+    .filter-controls label {
+      margin-right: 15px;
+    }
+    #requestLog, #consoleLog {
+      max-height: 500px;
+      overflow-y: auto;
+    }
+    .timestamp {
+      color: #666;
+      font-size: 12px;
+    }
+    .method {
+      font-weight: bold;
+    }
+    .method.post {
+      color: #0066cc;
+    }
+    .method.get {
+      color: #33cc66;
+    }
+    .url {
+      color: #333;
+    }
+    .headers-toggle {
+      cursor: pointer;
+      color: #0066cc;
+      text-decoration: underline;
+      font-size: 12px;
+    }
+    .headers {
+      display: none;
+      margin-top: 5px;
+      padding: 5px;
+      background-color: #f9f9f9;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .clear-button {
+      float: right;
+      background-color: #999;
+      font-size: 12px;
+      padding: 4px 8px;
+    }
+    .clear-button:hover {
+      background-color: #777;
+    }
+    .status-bar {
+      background-color: #333;
+      color: white;
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 8px;
+    }
+    .status-indicator.active {
+      background-color: #33cc66;
+      box-shadow: 0 0 10px #33cc66;
+    }
+    .status-indicator.inactive {
+      background-color: #cc3300;
+    }
+    .api-test-panel {
+      margin-top: 20px;
+      padding: 15px;
+      background-color: white;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+    .api-test-panel h3 {
+      margin-top: 0;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    .form-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    .form-group input, .form-group textarea {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    .form-group textarea {
+      height: 100px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="status-bar">
+      <div>
+        <span class="status-indicator active" id="monitorStatus"></span>
+        <span id="monitorStatusText">Monitoring active</span>
+      </div>
+      <div>
+        <span id="requestCount">0</span> requests captured
+      </div>
+    </div>
+
+    <div class="controls">
+      <h2>Network Monitor Controls</h2>
+      <button id="startMonitoring" class="success">Start Monitoring</button>
+      <button id="stopMonitoring" class="danger">Stop Monitoring</button>
+      <button id="clearLogs">Clear All Logs</button>
+      
+      <div class="filter-controls">
+        <label>
+          <input type="checkbox" id="filterVideoAnalysis" checked>
+          Only show /api/video-analysis requests
+        </label>
+        <label>
+          <input type="checkbox" id="showConsoleLog" checked>
+          Show console logs
+        </label>
+      </div>
+    </div>
+
+    <div class="dashboard">
+      <div class="panel">
+        <h2>
+          Network Requests
+          <button class="clear-button" id="clearRequests">Clear</button>
+        </h2>
+        <div id="requestLog"></div>
+      </div>
+      
+      <div class="panel">
+        <h2>
+          Console Logs
+          <button class="clear-button" id="clearConsole">Clear</button>
+        </h2>
+        <div id="consoleLog"></div>
+      </div>
+    </div>
+
+    <div class="api-test-panel">
+      <h3>Test Video Analysis API</h3>
+      <div class="form-group">
+        <label for="sessionId">Session ID:</label>
+        <input type="text" id="sessionId" value="test-session-1">
+      </div>
+      <div class="form-group">
+        <label for="videoUri">Video URI:</label>
+        <input type="text" id="videoUri" value="gs://wingman-interview-videos-harshit-2024/interviews/test/sample_video.webm">
+      </div>
+      <div class="form-group">
+        <label for="apiKey">API Key:</label>
+        <input type="text" id="apiKey" placeholder="Enter API key">
+      </div>
+      <div class="form-group">
+        <label for="requestBody">Request Body:</label>
+        <textarea id="requestBody">{
+  "videoUri": "gs://wingman-interview-videos-harshit-2024/interviews/test/sample_video.webm",
+  "sessionId": "test-session-1",
+  "analysisType": "comprehensive",
+  "isTestCall": true
+}</textarea>
+      </div>
+      <button id="testApiKey" class="success">Test with API Key</button>
+      <button id="testSession" class="success">Test with Session Cookie</button>
+    </div>
+  </div>
+
+  <script>
+    // State management
+    const state = {
+      isMonitoring: true,
+      requests: [],
+      consoleLogs: [],
+      filterVideoAnalysis: true,
+      showConsoleLog: true
+    };
+
+    // DOM elements
+    const elements = {
+      requestLog: document.getElementById('requestLog'),
+      consoleLog: document.getElementById('consoleLog'),
+      startMonitoring: document.getElementById('startMonitoring'),
+      stopMonitoring: document.getElementById('stopMonitoring'),
+      clearLogs: document.getElementById('clearLogs'),
+      clearRequests: document.getElementById('clearRequests'),
+      clearConsole: document.getElementById('clearConsole'),
+      filterVideoAnalysis: document.getElementById('filterVideoAnalysis'),
+      showConsoleLog: document.getElementById('showConsoleLog'),
+      monitorStatus: document.getElementById('monitorStatus'),
+      monitorStatusText: document.getElementById('monitorStatusText'),
+      requestCount: document.getElementById('requestCount'),
+      testApiKey: document.getElementById('testApiKey'),
+      testSession: document.getElementById('testSession'),
+      sessionId: document.getElementById('sessionId'),
+      videoUri: document.getElementById('videoUri'),
+      apiKey: document.getElementById('apiKey'),
+      requestBody: document.getElementById('requestBody')
+    };
+
+    // Initialize
+    function init() {
+      setupEventListeners();
+      setupNetworkMonitoring();
+      setupConsoleMonitoring();
+      updateUI();
+    }
+
+    // Set up event listeners
+    function setupEventListeners() {
+      elements.startMonitoring.addEventListener('click', startMonitoring);
+      elements.stopMonitoring.addEventListener('click', stopMonitoring);
+      elements.clearLogs.addEventListener('click', clearAllLogs);
+      elements.clearRequests.addEventListener('click', clearRequests);
+      elements.clearConsole.addEventListener('click', clearConsole);
+      elements.filterVideoAnalysis.addEventListener('change', toggleVideoAnalysisFilter);
+      elements.showConsoleLog.addEventListener('change', toggleConsoleLog);
+      elements.testApiKey.addEventListener('click', testWithApiKey);
+      elements.testSession.addEventListener('click', testWithSession);
+    }
+
+    // Network monitoring
+    function setupNetworkMonitoring() {
+      const originalFetch = window.fetch;
+      
+      window.fetch = async function(input, init) {
+        const url = typeof input === 'string' ? input : input.url;
+        const method = init?.method || (typeof input === 'string' ? 'GET' : input.method) || 'GET';
+        const headers = init?.headers || (typeof input === 'string' ? {} : input.headers) || {};
+        const body = init?.body || (typeof input === 'string' ? undefined : input.body);
+        
+        // Create request entry
+        const requestEntry = {
+          id: Date.now().toString(),
+          timestamp: new Date(),
+          url,
+          method,
+          headers: headers instanceof Headers ? Object.fromEntries([...headers.entries()]) : headers,
+          body: typeof body === 'string' ? body : body instanceof FormData ? '[FormData]' : body,
+          response: null,
+          error: null,
+          duration: 0
+        };
+        
+        // Only track if monitoring is active
+        if (state.isMonitoring) {
+          // Only add if it passes the filter
+          if (!state.filterVideoAnalysis || url.includes('/api/video-analysis')) {
+            state.requests.push(requestEntry);
+            logRequest(requestEntry);
+            updateRequestCount();
+          }
+        }
+        
+        const startTime = Date.now();
+        
+        try {
+          const response = await originalFetch.apply(this, arguments);
+          const endTime = Date.now();
+          
+          if (state.isMonitoring) {
+            if (!state.filterVideoAnalysis || url.includes('/api/video-analysis')) {
+              // Clone the response to read it
+              const clonedResponse = response.clone();
+              let responseBody;
+              
+              try {
+                const text = await clonedResponse.text();
+                try {
+                  responseBody = JSON.parse(text);
+                } catch (e) {
+                  responseBody = text;
+                }
+              } catch (e) {
+                responseBody = '[Could not read response body]';
+              }
+              
+              // Update request entry with response
+              const requestIndex = state.requests.findIndex(req => req.id === requestEntry.id);
+              if (requestIndex !== -1) {
+                state.requests[requestIndex].response = {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: Object.fromEntries([...response.headers.entries()]),
+                  body: responseBody
+                };
+                state.requests[requestIndex].duration = endTime - startTime;
+                
+                // Update the UI
+                logResponse(state.requests[requestIndex]);
+              }
+            }
+          }
+          
+          return response;
+        } catch (error) {
+          if (state.isMonitoring) {
+            if (!state.filterVideoAnalysis || url.includes('/api/video-analysis')) {
+              // Update request entry with error
+              const requestIndex = state.requests.findIndex(req => req.id === requestEntry.id);
+              if (requestIndex !== -1) {
+                state.requests[requestIndex].error = {
+                  name: error.name,
+                  message: error.message,
+                  stack: error.stack
+                };
+                
+                // Update the UI
+                logError(state.requests[requestIndex]);
+              }
+            }
+          }
+          
+          throw error;
+        }
+      };
+    }
+
+    // Console monitoring
+    function setupConsoleMonitoring() {
+      const originalConsole = {
+        log: console.log,
+        error: console.error,
+        warn: console.warn,
+        info: console.info
+      };
+      
+      function createLogWrapper(type, originalFn) {
+        return function() {
+          originalFn.apply(console, arguments);
+          
+          if (state.isMonitoring && state.showConsoleLog) {
+            const args = Array.from(arguments).map(arg => {
+              if (typeof arg === 'object') {
+                try {
+                  return JSON.stringify(arg, null, 2);
+                } catch (e) {
+                  return String(arg);
+                }
+              }
+              return String(arg);
+            });
+            
+            const logEntry = {
+              id: Date.now().toString(),
+              timestamp: new Date(),
+              type,
+              content: args.join(' ')
+            };
+            
+            if (logEntry.content.includes('VIDEO ANALYSIS') || 
+                logEntry.content.includes('video-analysis') ||
+                !state.filterVideoAnalysis) {
+              state.consoleLogs.push(logEntry);
+              logConsole(logEntry);
+            }
+          }
+        };
+      }
+      
+      console.log = createLogWrapper('log', originalConsole.log);
+      console.error = createLogWrapper('error', originalConsole.error);
+      console.warn = createLogWrapper('warn', originalConsole.warn);
+      console.info = createLogWrapper('info', originalConsole.info);
+    }
+
+    // UI update functions
+    function logRequest(request) {
+      const logEntry = document.createElement('div');
+      logEntry.className = 'log-entry request';
+      logEntry.dataset.id = request.id;
+      
+      const timestamp = document.createElement('span');
+      timestamp.className = 'timestamp';
+      timestamp.textContent = formatTime(request.timestamp);
+      
+      const method = document.createElement('span');
+      method.className = `method ${request.method.toLowerCase()}`;
+      method.textContent = request.method;
+      
+      const url = document.createElement('span');
+      url.className = 'url';
+      url.textContent = request.url;
+      
+      const headersToggle = document.createElement('span');
+      headersToggle.className = 'headers-toggle';
+      headersToggle.textContent = 'Show Headers';
+      headersToggle.addEventListener('click', function() {
+        const headers = this.nextElementSibling;
+        headers.style.display = headers.style.display === 'none' ? 'block' : 'none';
+        this.textContent = headers.style.display === 'none' ? 'Show Headers' : 'Hide Headers';
+      });
+      
+      const headers = document.createElement('pre');
+      headers.className = 'headers';
+      headers.textContent = JSON.stringify(request.headers, null, 2);
+      
+      const body = document.createElement('div');
+      if (request.body) {
+        const bodyContent = typeof request.body === 'string' ? request.body : JSON.stringify(request.body, null, 2);
+        body.innerHTML = `<strong>Body:</strong><pre>${bodyContent}</pre>`;
+      }
+      
+      logEntry.appendChild(timestamp);
+      logEntry.appendChild(document.createTextNode(' '));
+      logEntry.appendChild(method);
+      logEntry.appendChild(document.createTextNode(' '));
+      logEntry.appendChild(url);
+      logEntry.appendChild(document.createElement('br'));
+      logEntry.appendChild(headersToggle);
+      logEntry.appendChild(headers);
+      if (request.body) {
+        logEntry.appendChild(body);
+      }
+      
+      elements.requestLog.prepend(logEntry);
+    }
+
+    function logResponse(request) {
+      const existingEntry = document.querySelector(`.log-entry.request[data-id="${request.id}"]`);
+      if (!existingEntry) return;
+      
+      const responseDiv = document.createElement('div');
+      responseDiv.className = 'response-details';
+      
+      const status = document.createElement('span');
+      status.className = `status ${request.response.status < 400 ? 'success' : 'error'}`;
+      status.textContent = `${request.response.status} ${request.response.statusText}`;
+      
+      const duration = document.createElement('span');
+      duration.textContent = ` (${request.duration}ms)`;
+      
+      const headersToggle = document.createElement('span');
+      headersToggle.className = 'headers-toggle';
+      headersToggle.textContent = 'Show Response Headers';
+      headersToggle.addEventListener('click', function() {
+        const headers = this.nextElementSibling;
+        headers.style.display = headers.style.display === 'none' ? 'block' : 'none';
+        this.textContent = headers.style.display === 'none' ? 'Show Response Headers' : 'Hide Response Headers';
+      });
+      
+      const headers = document.createElement('pre');
+      headers.className = 'headers';
+      headers.textContent = JSON.stringify(request.response.headers, null, 2);
+      headers.style.display = 'none';
+      
+      const body = document.createElement('div');
+      if (request.response.body) {
+        const bodyContent = typeof request.response.body === 'string' ? 
+          request.response.body : 
+          JSON.stringify(request.response.body, null, 2);
+        body.innerHTML = `<strong>Response Body:</strong><pre>${bodyContent}</pre>`;
+      }
+      
+      responseDiv.appendChild(document.createTextNode('Response: '));
+      responseDiv.appendChild(status);
+      responseDiv.appendChild(duration);
+      responseDiv.appendChild(document.createElement('br'));
+      responseDiv.appendChild(headersToggle);
+      responseDiv.appendChild(headers);
+      if (request.response.body) {
+        responseDiv.appendChild(body);
+      }
+      
+      existingEntry.appendChild(responseDiv);
+      existingEntry.className = 'log-entry response';
+    }
+
+    function logError(request) {
+      const existingEntry = document.querySelector(`.log-entry.request[data-id="${request.id}"]`);
+      if (!existingEntry) return;
+      
+      const errorDiv = document.createElement('div');
+      errorDiv.className = 'error-details';
+      
+      const errorName = document.createElement('span');
+      errorName.className = 'status error';
+      errorName.textContent = request.error.name;
+      
+      const errorMessage = document.createElement('div');
+      errorMessage.innerHTML = `<strong>Error:</strong> ${request.error.message}`;
+      
+      const errorStack = document.createElement('pre');
+      errorStack.textContent = request.error.stack;
+      errorStack.style.fontSize = '12px';
+      
+      errorDiv.appendChild(document.createTextNode('Error: '));
+      errorDiv.appendChild(errorName);
+      errorDiv.appendChild(errorMessage);
+      errorDiv.appendChild(errorStack);
+      
+      existingEntry.appendChild(errorDiv);
+      existingEntry.className = 'log-entry error';
+    }
+
+    function logConsole(logEntry) {
+      const entry = document.createElement('div');
+      entry.className = `log-entry info ${logEntry.type}`;
+      
+      const timestamp = document.createElement('span');
+      timestamp.className = 'timestamp';
+      timestamp.textContent = formatTime(logEntry.timestamp);
+      
+      const content = document.createElement('span');
+      
+      // Check if content contains VIDEO ANALYSIS and highlight it
+      let contentText = logEntry.content;
+      if (contentText.includes('VIDEO ANALYSIS') || contentText.includes('video-analysis')) {
+        contentText = contentText.replace(/VIDEO ANALYSIS|video-analysis/gi, match => 
+          `<span style="background-color: #ffff00; font-weight: bold;">${match}</span>`);
+        content.innerHTML = contentText;
+      } else {
+        content.textContent = contentText;
+      }
+      
+      entry.appendChild(timestamp);
+      entry.appendChild(document.createTextNode(' '));
+      entry.appendChild(content);
+      
+      elements.consoleLog.prepend(entry);
+    }
+
+    // Helper functions
+    function formatTime(date) {
+      return date.toLocaleTimeString('en-US', { 
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        fractionalSecondDigits: 3
+      });
+    }
+
+    function updateRequestCount() {
+      elements.requestCount.textContent = state.requests.length;
+    }
+
+    function updateUI() {
+      elements.monitorStatus.className = `status-indicator ${state.isMonitoring ? 'active' : 'inactive'}`;
+      elements.monitorStatusText.textContent = state.isMonitoring ? 'Monitoring active' : 'Monitoring paused';
+      elements.startMonitoring.disabled = state.isMonitoring;
+      elements.stopMonitoring.disabled = !state.isMonitoring;
+    }
+
+    // Action handlers
+    function startMonitoring() {
+      state.isMonitoring = true;
+      updateUI();
+    }
+
+    function stopMonitoring() {
+      state.isMonitoring = false;
+      updateUI();
+    }
+
+    function clearAllLogs() {
+      clearRequests();
+      clearConsole();
+    }
+
+    function clearRequests() {
+      state.requests = [];
+      elements.requestLog.innerHTML = '';
+      updateRequestCount();
+    }
+
+    function clearConsole() {
+      state.consoleLogs = [];
+      elements.consoleLog.innerHTML = '';
+    }
+
+    function toggleVideoAnalysisFilter() {
+      state.filterVideoAnalysis = elements.filterVideoAnalysis.checked;
+    }
+
+    function toggleConsoleLog() {
+      state.showConsoleLog = elements.showConsoleLog.checked;
+    }
+
+    // API test functions
+    async function testWithApiKey() {
+      const apiKey = elements.apiKey.value;
+      if (!apiKey) {
+        alert('Please enter an API key');
+        return;
+      }
+      
+      try {
+        let requestBody;
+        try {
+          requestBody = JSON.parse(elements.requestBody.value);
+        } catch (e) {
+          alert('Invalid JSON in request body');
+          return;
+        }
+        
+        // Override sessionId and videoUri if provided
+        if (elements.sessionId.value) {
+          requestBody.sessionId = elements.sessionId.value;
+        }
+        if (elements.videoUri.value) {
+          requestBody.videoUri = elements.videoUri.value;
+        }
+        
+        // Add test flag
+        requestBody.isTestCall = true;
+        
+        console.log('Testing video analysis API with API key authentication');
+        
+        const response = await fetch('/api/video-analysis', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(requestBody)
+        });
+        
+        console.log(`API key test response: ${response.status} ${response.statusText}`);
+      } catch (error) {
+        console.error('API key test error:', error);
+      }
+    }
+
+    async function testWithSession() {
+      try {
+        let requestBody;
+        try {
+          requestBody = JSON.parse(elements.requestBody.value);
+        } catch (e) {
+          alert('Invalid JSON in request body');
+          return;
+        }
+        
+        // Override sessionId and videoUri if provided
+        if (elements.sessionId.value) {
+          requestBody.sessionId = elements.sessionId.value;
+        }
+        if (elements.videoUri.value) {
+          requestBody.videoUri = elements.videoUri.value;
+        }
+        
+        // Add test flag
+        requestBody.isTestCall = true;
+        
+        console.log('Testing video analysis API with session authentication');
+        
+        const response = await fetch('/api/video-analysis', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Auth-Method': 'hybrid-session'
+          },
+          credentials: 'include',
+          body: JSON.stringify(requestBody)
+        });
+        
+        console.log(`Session test response: ${response.status} ${response.statusText}`);
+      } catch (error) {
+        console.error('Session test error:', error);
+      }
+    }
+
+    // Initialize the app
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,1055 @@
+'use client';
+
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
+import { Mic, MicOff, Video, VideoOff, Square, Send, MessageCircle, Brain, FileText, Clock, Play } from 'lucide-react';
+import { signIn, getSession, useSession } from 'next-auth/react';
+import { triggerVideoAnalysisWithRetry, ensureValidSession } from './VideoAnalysisHelper';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+  speakerSegments?: Array<{
+    speaker: string;
+    text: string;
+    startTime: number;
+    endTime: number;
+  }>;
+}
+
+interface UnifiedInterviewSessionProps {
+  sessionId: string;
+  interviewType: string;
+  difficulty: string;
+  duration: number;
+  isConversational: boolean;
+  onComplete?: (sessionData: any) => void;
+}
+
+function UnifiedInterviewSession({
+  sessionId,
+  interviewType,
+  difficulty,
+  duration,
+  isConversational,
+  onComplete
+}: UnifiedInterviewSessionProps) {
+  // Recording states
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  
+  // Conversational AI states
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [analysisProgress, setAnalysisProgress] = useState<string>('');
+  const [analysisComplete, setAnalysisComplete] = useState(false);
+  const [interviewStarted, setInterviewStarted] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isInterviewFlowCompleted, setInterviewFlowCompleted] = useState(false);
+  const [isPolling, setIsPolling] = useState(false);
+  // Timer states
+  const [timeRemaining, setTimeRemaining] = useState(duration * 60); // Convert to seconds
+  const [timerActive, setTimerActive] = useState(false);
+  
+  // Media refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const visionAnalysisIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Vision API states
+  const [visionAnalysisData, setVisionAnalysisData] = useState<any[]>([]);
+
+  // Timer effect
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (timerActive && timeRemaining > 0) {
+      interval = setInterval(() => {
+        setTimeRemaining((prev) => {
+          if (prev <= 1) {
+            setTimerActive(false);
+            handleEndInterview();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [timerActive, timeRemaining]);
+
+  const pollForAnalysisResults = useCallback(() => {
+    if (isPolling) return;
+    setIsPolling(true);
+    console.log('🔄 [Polling] Starting to poll for analysis results...');
+
+    const intervalId = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/video-analysis/results/${sessionId}`);
+        if (response.ok) {
+          console.log('✅ [Polling] Video analysis complete!');
+          clearInterval(intervalId);
+          setIsPolling(false);
+
+          if (isConversational) {
+            setAnalysisProgress('Video analysis complete. Generating conversational feedback...');
+            try {
+              console.log('🔄 [Feedback] Triggering conversational feedback API...');
+              const feedbackResponse = await fetch('/api/ai/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                  sessionId,
+                  conversationHistory: messages 
+                }),
+              });
+
+              if (feedbackResponse.ok) {
+                console.log('✅ [Feedback] Conversational feedback generated successfully.');
+                setAnalysisProgress('All analyses complete! Preparing results...');
+              } else {
+                console.error('❌ [Feedback] Conversational feedback API failed:', feedbackResponse.status);
+                setAnalysisProgress('Could not generate conversational feedback. Video results are available.');
+              }
+            } catch (error) {
+              console.error('❌ [Feedback] Error calling feedback API:', error);
+              setAnalysisProgress('An error occurred during conversational feedback generation.');
+            } finally {
+              setInterviewFlowCompleted(true);
+            }
+          } else {
+            setAnalysisProgress('Analysis complete! Preparing results...');
+            setInterviewFlowCompleted(true);
+          }
+        } else {
+          console.log('🔄 [Polling] Analysis not ready yet...');
+          setAnalysisProgress('Analysis in progress, this may take a few minutes...');
+        }
+      } catch (error) {
+        console.error('❌ [Polling] Error checking analysis status:', error);
+        clearInterval(intervalId);
+        setIsPolling(false);
+        setAnalysisProgress('Could not retrieve analysis status. You can check the feedback page later.');
+        setInterviewFlowCompleted(true); // Complete flow to avoid getting stuck
+      }
+    }, 5000);
+
+    // Safety timeout after 5 minutes
+    const timeoutId = setTimeout(() => {
+      clearInterval(intervalId);
+      if (isPolling) {
+        console.log('⌛️ [Polling] Polling timed out.');
+        setIsPolling(false);
+        setAnalysisProgress('Analysis is taking longer than expected. Please check the feedback page later.');
+        setInterviewFlowCompleted(true); // Complete flow to avoid getting stuck
+      }
+    }, 300000);
+
+    return () => {
+      clearInterval(intervalId);
+      clearTimeout(timeoutId);
+    };
+  }, [isPolling, sessionId]);
+
+  const analyzeFrame = useCallback(async () => {
+    if (!videoRef.current || videoRef.current.paused || videoRef.current.ended) {
+      return;
+    }
+
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext('2d');
+    
+    if (context) {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageDataUrl = canvas.toDataURL('image/jpeg');
+
+      try {
+        const response = await fetch('/api/vision/analyze-frame', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: imageDataUrl }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success) {
+            setVisionAnalysisData(prevData => [...prevData, { timestamp: Date.now(), ...data }]);
+            console.log('Frame analysis successful:', data);
+          }
+        } else {
+          console.error('Frame analysis API failed:', response.status);
+        }
+      } catch (error) {
+        console.error('Error sending frame for analysis:', error);
+      }
+    }
+  }, []);
+
+  const startFrameAnalysis = useCallback(() => {
+    if (visionAnalysisIntervalRef.current) return; // Already running
+    visionAnalysisIntervalRef.current = setInterval(analyzeFrame, 5000);
+    console.log('▶️ [Vision] Started frame analysis.');
+  }, [analyzeFrame]);
+
+  const stopFrameAnalysis = useCallback(() => {
+    if (visionAnalysisIntervalRef.current) {
+      clearInterval(visionAnalysisIntervalRef.current);
+      visionAnalysisIntervalRef.current = null;
+      console.log('⏹️ [Vision] Stopped frame analysis.');
+    }
+  }, []);
+
+
+  // Effect to handle interview completion and redirection
+  useEffect(() => {
+    if (isInterviewFlowCompleted) {
+      console.log('Interview flow complete, calling onComplete...');
+      onComplete?.({
+        sessionId,
+        status: 'processing',
+        hasVideo: !!recordedBlob,
+        hasConversation: isConversational && messages.length > 0,
+        messages: isConversational ? messages : []
+      });
+    }
+  }, [isInterviewFlowCompleted, onComplete, sessionId, recordedBlob, isConversational, messages]);
+
+  // Format time display
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Start the interview
+  const startInterview = useCallback(async () => {
+    setIsProcessing(true);
+    try {
+      // Get camera and microphone access
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: true, 
+        audio: {
+          sampleRate: 48000,
+          channelCount: 1,
+          echoCancellation: true,
+
+  const video = videoRef.current;
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const context = canvas.getContext('2d');
+  
+  if (context) {
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageDataUrl = canvas.toDataURL('image/jpeg');
+
+    try {
+      const response = await fetch('/api/vision/analyze-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageDataUrl }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          setVisionAnalysisData(prevData => [...prevData, { timestamp: Date.now(), ...data }]);
+          console.log('Frame analysis successful:', data);
+        }
+      } else {
+        console.error('Frame analysis API failed:', response.status);
+      }
+    } catch (error) {
+      console.error('Error sending frame for analysis:', error);
+    }
+  }
+}, []);
+
+const startFrameAnalysis = useCallback(() => {
+  if (visionAnalysisIntervalRef.current) return; // Already running
+  visionAnalysisIntervalRef.current = setInterval(analyzeFrame, 5000);
+  console.log(' [Vision] Started frame analysis.');
+}, [analyzeFrame]);
+
+const stopFrameAnalysis = useCallback(() => {
+  if (visionAnalysisIntervalRef.current) {
+    clearInterval(visionAnalysisIntervalRef.current);
+    visionAnalysisIntervalRef.current = null;
+    console.log(' [Vision] Stopped frame analysis.');
+  }
+}, []);
+
+// Effect to handle interview completion and redirection
+useEffect(() => {
+  if (isInterviewFlowCompleted) {
+    console.log('Interview flow complete, calling onComplete...');
+    onComplete?.({
+      sessionId,
+      status: 'processing',
+      hasVideo: !!recordedBlob,
+      hasConversation: isConversational && messages.length > 0,
+      messages: isConversational ? messages : []
+    });
+  }
+}, [isInterviewFlowCompleted, onComplete, sessionId, recordedBlob, isConversational, messages]);
+
+// Format time display
+const formatTime = (seconds: number) => {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+// Start the interview
+const startInterview = useCallback(async () => {
+  setIsProcessing(true);
+  try {
+    // Get camera and microphone access
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      video: true, 
+      audio: {
+        sampleRate: 48000,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    });
+    
+    streamRef.current = stream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().then(() => {
+        console.log('[Video] Stream attached and playing. Starting frame analysis.');
+        startFrameAnalysis();
+      }).catch(e => console.error('Error auto-playing video:', e));
+    }
+
+    // Start timer
+    setTimerActive(true);
+    setInterviewStarted(true);
+
+    if (isConversational) {
+      // Get initial AI question
+      const response = await fetch('/api/ai/interviewer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          jobRole: 'Software Engineer',
+          company: 'FAANG',
+          interviewType,
+          conversationHistory: []
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('AI interviewer response:', data);
+        setCurrentQuestion(data.question);
+        setMessages([{ 
+          role: 'assistant', 
+          content: data.question, 
+          timestamp: new Date() 
+        }]);
+      } else {
+        console.error('AI interviewer API error:', response.status, await response.text());
+        // Fallback question if API fails
+        const fallbackQuestion = `Hello! I'm your AI interviewer today. Let's start with a ${interviewType} question. Tell me about a challenging ${interviewType === 'behavioral' ? 'situation you faced at work' : interviewType === 'technical' ? 'technical problem you solved' : interviewType === 'system-design' ? 'system you designed' : 'project you worked on'} and how you handled it.`;
+        setCurrentQuestion(fallbackQuestion);
+        setMessages([{ 
+          role: 'assistant', 
+          content: fallbackQuestion, 
+          timestamp: new Date() 
+        }]);
+      }
+    }
+  } catch (error) {
+    console.error('Failed to start interview:', error);
+    alert('Failed to access camera/microphone. Please check permissions.');
+  } finally {
+    setIsProcessing(false);
+  }
+}, [sessionId, interviewType, isConversational]);
+
+// Start recording
+const startRecording = useCallback(async () => {
+  if (!streamRef.current) return;
+
+  try {
+    const mediaRecorder = new MediaRecorder(streamRef.current, {
+      mimeType: 'video/webm;codecs=vp9,opus'
+    });
+    
+    mediaRecorderRef.current = mediaRecorder;
+    chunksRef.current = [];
+
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunksRef.current.push(event.data);
+      }
+    };
+
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+      setRecordedBlob(blob);
+      setVideoUrl(URL.createObjectURL(blob));
+      // Automatically end the interview to process the final recording
+      handleEndInterview();
+    };
+
+    mediaRecorder.start(1000); // Record in 1-second chunks
+    setIsRecording(true);
+  } catch (error) {
+    console.error('Failed to start recording:', error);
+  }
+}, [isConversational]);
+
+// Stop recording
+const stopRecording = useCallback(() => {
+  if (mediaRecorderRef.current && isRecording) {
+    mediaRecorderRef.current.stop();
+    setIsRecording(false);
+  }
+}, [isRecording]);
+
+// Process conversational response
+const processConversationalResponse = useCallback(async (videoBlob: Blob) => {
+  setIsProcessing(true);
+  try {
+    console.log('Processing conversational response, blob size:', videoBlob.size);
+    
+    // Create FormData for direct upload to speech API
+    const formData = new FormData();
+    formData.append('audio', videoBlob, `response_${Date.now()}.webm`);
+    formData.append('sessionId', sessionId);
+    formData.append('enableDiarization', 'true');
+    
+    // Send to speech-to-text API
+    const speechResponse = await fetch('/api/ai/speech-stream', {
+      method: 'POST',
+      body: formData // Send as FormData instead of JSON
+    });
+
+    if (speechResponse.ok) {
+      const speechData = await speechResponse.json();
+      console.log('Speech response:', speechData);
+      
+      let userTranscript = '';
+      if (speechData.transcripts && speechData.transcripts.length > 0) {
+        userTranscript = speechData.transcripts
+          .map((t: any) => t.text || t.transcript || '')
+          .join(' ')
+          .trim();
+      } else if (speechData.transcript) {
+        userTranscript = speechData.transcript.trim();
+      }
+
+      console.log('User transcript:', userTranscript);
+
+      if (userTranscript) {
+        // Add user message
+        const userMessage: Message = {
+          role: 'user',
+          content: userTranscript,
+          timestamp: new Date(),
+          speakerSegments: speechData.speakerSegments
+        };
+
+        setMessages(prev => {
+          const newMessages = [...prev, userMessage];
+          console.log('Updated messages:', newMessages);
+          return newMessages;
+        });
+
+        // Get AI response
+        const aiResponse = await fetch('/api/ai/interviewer', {
+      if (isConversational) {
+        // Get initial AI question
+        const response = await fetch('/api/ai/interviewer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId,
+            jobRole: 'Software Engineer',
+            company: 'FAANG',
+            interviewType,
+            conversationHistory: []
+          })
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log('AI interviewer response:', data);
+          setCurrentQuestion(data.question);
+          setMessages([{ 
+            role: 'assistant', 
+            content: data.question, 
+            timestamp: new Date() 
+          }]);
+        } else {
+          console.error('AI interviewer API error:', response.status, await response.text());
+          // Fallback question if API fails
+          const fallbackQuestion = `Hello! I'm your AI interviewer today. Let's start with a ${interviewType} question. Tell me about a challenging ${interviewType === 'behavioral' ? 'situation you faced at work' : interviewType === 'technical' ? 'technical problem you solved' : interviewType === 'system-design' ? 'system you designed' : 'project you worked on'} and how you handled it.`;
+          setCurrentQuestion(fallbackQuestion);
+          setMessages([{ 
+            role: 'assistant', 
+            content: fallbackQuestion, 
+            timestamp: new Date() 
+          }]);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to start interview:', error);
+      alert('Failed to access camera/microphone. Please check permissions.');
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [sessionId, interviewType, isConversational]);
+
+  // Start recording
+  const startRecording = useCallback(async () => {
+    if (!streamRef.current) return;
+
+    try {
+      const mediaRecorder = new MediaRecorder(streamRef.current, {
+        mimeType: 'video/webm;codecs=vp9,opus'
+      });
+      
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+        setRecordedBlob(blob);
+        setVideoUrl(URL.createObjectURL(blob));
+        // Automatically end the interview to process the final recording
+        handleEndInterview();
+      };
+
+      mediaRecorder.start(1000); // Record in 1-second chunks
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Failed to start recording:', error);
+    }
+  }, [isConversational]);
+
+  // Stop recording
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  }, [isRecording]);
+
+  // Process conversational response
+  const processConversationalResponse = useCallback(async (videoBlob: Blob) => {
+    setIsProcessing(true);
+    try {
+      console.log('Processing conversational response, blob size:', videoBlob.size);
+      
+      // Create FormData for direct upload to speech API
+      const formData = new FormData();
+      formData.append('audio', videoBlob, `response_${Date.now()}.webm`);
+      formData.append('sessionId', sessionId);
+      formData.append('enableDiarization', 'true');
+      
+      // Send to speech-to-text API
+      const speechResponse = await fetch('/api/ai/speech-stream', {
+        method: 'POST',
+        body: formData // Send as FormData instead of JSON
+      });
+
+      if (speechResponse.ok) {
+        const speechData = await speechResponse.json();
+        console.log('Speech response:', speechData);
+        
+        let userTranscript = '';
+        if (speechData.transcripts && speechData.transcripts.length > 0) {
+          userTranscript = speechData.transcripts
+            .map((t: any) => t.text || t.transcript || '')
+            .join(' ')
+            .trim();
+        } else if (speechData.transcript) {
+          userTranscript = speechData.transcript.trim();
+        }
+
+        console.log('User transcript:', userTranscript);
+
+        if (userTranscript) {
+          // Add user message
+          const userMessage: Message = {
+            role: 'user',
+            content: userTranscript,
+            timestamp: new Date(),
+            speakerSegments: speechData.speakerSegments
+          };
+
+          setMessages(prev => {
+            const newMessages = [...prev, userMessage];
+            console.log('Updated messages:', newMessages);
+            return newMessages;
+          });
+
+          // Get AI response
+          const aiResponse = await fetch('/api/ai/interviewer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userResponse: userTranscript,
+              conversationHistory: [...messages, userMessage].map(m => ({
+                role: m.role,
+                content: m.content
+              })),
+              sessionId,
+              jobRole: 'Software Engineer',
+              company: 'FAANG',
+              interviewType
+            })
+          });
+
+          if (aiResponse.ok) {
+            const aiData = await aiResponse.json();
+            console.log('AI response:', aiData);
+            setCurrentQuestion(aiData.question);
+            setMessages(prev => [...prev, {
+              role: 'assistant',
+              content: aiData.question,
+              timestamp: new Date()
+            }]);
+          } else {
+            console.error('AI response failed:', aiResponse.status, await aiResponse.text());
+          }
+        } else {
+          console.warn('No transcript received from speech API');
+          // Show error message instead of prompt
+          setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: 'I had trouble processing your audio response. Please try speaking again or click "End Interview" if you\'re finished.',
+            timestamp: new Date()
+          }]);
+        }
+      } else {
+        console.error('Speech API failed:', speechResponse.status, await speechResponse.text());
+        // Show error in conversation instead of alert
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          content: 'I had trouble processing your audio. Please try recording your response again, or click "End Interview" if you\'re ready to finish.',
+          timestamp: new Date()
+        }]);
+      }
+    } catch (error) {
+      console.error('Failed to process conversational response:', error);
+      // Show error in conversation instead of alert
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'I encountered an error processing your response. Please try again or click "End Interview" to finish.',
+        timestamp: new Date()
+      }]);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [messages, sessionId, interviewType]);
+
+
+  // Enhanced end interview with JWT session validation
+  const handleEndInterview = useCallback(async () => {
+    console.log('handleEndInterview called');
+    stopFrameAnalysis();
+    setTimerActive(false);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+    }
+    
+    setIsAnalyzing(true);
+    setAnalysisProgress('Starting video processing...');
+    
+    try {
+      // Check database session validity before starting critical operations
+      const sessionValid = await ensureValidSession();
+      if (!sessionValid) {
+        console.log('Session validation failed, but continuing with upload...');
+        setAnalysisProgress('Session may have expired - video will be saved, please refresh the page after upload completes');
+      } else {
+        console.log('Session validated successfully, proceeding with upload and analysis');
+      }
+      
+      // Upload video to Google Cloud Storage if recorded
+      if (recordedBlob) {
+        console.log('Uploading video to Google Cloud Storage...');
+        const formData = new FormData();
+        formData.append('file', recordedBlob, `interview_${sessionId}_${Date.now()}.webm`);
+        formData.append('sessionId', sessionId);
+
+        const uploadResponse = await fetch('/api/upload/direct', {
+          method: 'POST',
+          body: formData,
+          credentials: 'include', // Include session cookies
+          headers: {
+            'X-Auth-Method': 'hybrid-session'
+          }
+        });
+
+        if (uploadResponse.ok) {
+          const { videoUri } = await uploadResponse.json();
+          console.log('Video uploaded successfully:', videoUri);
+          
+          // Create recording entry with video URI and update session status
+          console.log('Creating recording entry with video URI...');
+          await fetch(`/api/recordings`, {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'X-Auth-Method': 'hybrid-session'
+            },
+            credentials: 'include', // Include session cookies
+            body: JSON.stringify({
+              sessionId: sessionId,
+              url: videoUri,
+              durationSec: duration * 60, // Convert minutes to seconds
+              consent: true
+            })
+          });
+          
+          // Update session status to completed
+          await fetch(`/api/ai/session/${sessionId}`, {
+            method: 'PATCH',
+            headers: { 
+              'Content-Type': 'application/json',
+              'X-Auth-Method': 'hybrid-session'
+            },
+            credentials: 'include', // Include session cookies
+            body: JSON.stringify({ 
+              status: 'COMPLETED' 
+            })
+          });
+          console.log('Recording created and session updated');
+
+          // Save vision analysis frames
+          if (visionAnalysisData.length > 0) {
+            console.log(`Saving ${visionAnalysisData.length} vision analysis frames...`);
+            try {
+              await fetch('/api/vision/save-frames', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId, frames: visionAnalysisData }),
+              });
+              console.log('Vision analysis frames saved successfully.');
+            } catch (error) {
+              console.error('Failed to save vision analysis frames:', error);
+              // Don't block the main flow if this fails
+            }
+          }
+          
+          // Refresh session before triggering analysis
+          await fetch('/api/auth/session', { 
+            method: 'GET', 
+            credentials: 'same-origin',
+            headers: {
+              'Cache-Control': 'no-cache'
+            }
+          });
+          
+          // Trigger video analysis with enhanced retry logic and detailed error logging
+          try {
+            console.log('🔄 VIDEO FLOW - Attempting to trigger video analysis...');
+            setAnalysisProgress('Starting video analysis...');
+            
+            const fullGcsUri = `gs://${process.env.NEXT_PUBLIC_GCS_BUCKET_NAME}/${videoUri}`;
+            console.log(`[UnifiedInterviewSession] Triggering analysis for full GCS URI: ${fullGcsUri}`);
+
+            const analysisTriggered = await triggerVideoAnalysisWithRetry(
+              fullGcsUri,
+              sessionId,
+              3,
+              (message: string) => {
+                console.log(`🔄 VIDEO FLOW - Analysis progress: ${message}`);
+                setAnalysisProgress(message);
+              }
+            );
+            
+            console.log('✅ VIDEO FLOW - Video analysis trigger completed successfully');
+            setAnalysisProgress('Video analysis started successfully!');
+            // Instead of immediately completing, start polling for results
+            pollForAnalysisResults();
+          } catch (analysisError) {
+            // Detailed error logging
+            console.error('❌ VIDEO FLOW - Video analysis trigger failed:', analysisError);
+            
+            // Log error details
+            if (analysisError instanceof Error) {
+              console.error('❌ VIDEO FLOW - Error details:', {
+                name: analysisError.name,
+                message: analysisError.message,
+                stack: analysisError.stack
+              });
+            } else {
+              console.error('❌ VIDEO FLOW - Non-Error object thrown:', analysisError);
+            }
+            
+            // Don't fail the entire flow - video is uploaded
+            setAnalysisProgress('Video saved - analysis will continue in background');
+            
+            // Show user-friendly message
+            const errorMessage = analysisError instanceof Error ? analysisError.message : 'Unknown error';
+            console.log(`❌ VIDEO FLOW - Analysis failed but video saved: ${errorMessage}`);
+            
+            // Try API key fallback if available
+            const API_SECRET_KEY = process.env.NEXT_PUBLIC_API_SECRET_KEY;
+            if (API_SECRET_KEY) {
+              console.log('🔄 VIDEO FLOW - Attempting API key fallback for video analysis...');
+              try {
+                const response = await fetch('/api/video-analysis', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${API_SECRET_KEY}`
+                  },
+                  body: JSON.stringify({
+                    videoUri,
+                    sessionId,
+                    analysisType: 'comprehensive',
+                    retryAttempt: 1,
+                    isDirectApiKeyFallback: true
+                  })
+                });
+                
+                if (response.ok) {
+                  console.log('✅ VIDEO FLOW - API key fallback successful');
+                  setAnalysisProgress('Video analysis started with API key authentication');
+                } else {
+                  console.error('❌ VIDEO FLOW - API key fallback failed:', response.status);
+                  const errorText = await response.text();
+                  console.error('❌ VIDEO FLOW - API key fallback error details:', errorText);
+                }
+              } catch (fallbackError) {
+                console.error('❌ VIDEO FLOW - API key fallback exception:', fallbackError);
+              }
+            }
+          }
+        } else {
+          console.error('Video upload failed:', uploadResponse.status);
+          const errorText = await uploadResponse.text();
+          console.error('Upload error details:', errorText);
+          throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
+        }
+      }
+
+      // The onComplete call will now be handled by a separate mechanism
+      // that polls for analysis completion, so we remove the direct call from here
+      // to prevent premature redirection.
+      console.log('handleEndInterview finished, analysis is processing in the background.');
+      
+    } catch (error) {
+      console.error('Error in handleEndInterview:', error);
+      // Still call onComplete to ensure flow continues
+      onComplete?.({
+        sessionId,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+        hasVideo: !!recordedBlob,
+        hasConversation: isConversational && messages.length > 0,
+        messages: isConversational ? messages : []
+      });
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [recordedBlob, messages, isConversational, sessionId, onComplete]);
+
+  return (
+    <div className="max-w-6xl mx-auto p-6 space-y-6">
+      {/* Progress Steps */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className={`flex items-center gap-2 ${!interviewStarted ? 'text-blue-600' : 'text-gray-400'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${!interviewStarted ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>1</div>
+              <span className="font-medium">Setup</span>
+            </div>
+            <div className={`flex items-center gap-2 ${interviewStarted && !isAnalyzing ? 'text-blue-600' : 'text-gray-400'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${interviewStarted && !isAnalyzing ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>2</div>
+              <span className="font-medium">Interview</span>
+            </div>
+            <div className={`flex items-center gap-2 ${isAnalyzing ? 'text-blue-600' : 'text-gray-400'}`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isAnalyzing ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}>3</div>
+              <span className="font-medium">Analysis</span>
+            </div>
+            <div className="flex items-center gap-2 text-gray-400">
+              <div className="w-8 h-8 rounded-full flex items-center justify-center bg-gray-200">4</div>
+              <span className="font-medium">Feedback</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Header */}
+      <Card>
+        <CardHeader>
+          <div className="flex justify-between items-start">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                {isConversational ? <MessageCircle className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+                {isConversational ? 'Conversational AI Interview' : 'Video Interview Practice'}
+              </CardTitle>
+              <div className="flex gap-2 mt-2">
+                <Badge variant="outline">{interviewType}</Badge>
+                <Badge variant="outline">{difficulty}</Badge>
+                <Badge variant="outline">{duration} min</Badge>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-2xl font-bold text-primary">{formatTime(timeRemaining)}</div>
+              <div className="text-sm text-muted-foreground">Time remaining</div>
+            </div>
+          </div>
+          <Progress value={(timeRemaining / (duration * 60)) * 100} className="mt-4" />
+        </CardHeader>
+      </Card>
+
+      {/* Analysis Progress */}
+      {analysisProgress && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+              Video Analysis Progress
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              <div className="text-sm text-muted-foreground">{analysisProgress}</div>
+              <Progress value={analysisComplete ? 100 : 33} className="w-full" />
+              <div className="text-xs text-muted-foreground">
+                {analysisComplete ? 'Analysis complete' : 'This may take several minutes...'}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Video Preview */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="relative">
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              className="w-full max-w-2xl mx-auto rounded-lg bg-black"
+              style={{ aspectRatio: '16/9' }}
+            />
+            {isRecording && (
+              <div className="absolute top-4 right-4 flex items-center gap-2 bg-red-600 text-white px-3 py-1 rounded-full">
+                <div className="w-3 h-3 bg-white rounded-full animate-pulse"></div>
+                Recording
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Conversational Messages */}
+      {isConversational && interviewStarted && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Interview Conversation</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4 max-h-60 overflow-y-auto">
+              {messages.map((message, index) => (
+                <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                    message.role === 'user' 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-gray-100 text-gray-900'
+                  }`}>
+                    <div className="text-sm font-semibold mb-1">
+                      {message.role === 'user' ? 'You' : 'AI Interviewer'}
+                    </div>
+                    <div className="text-sm">{message.content}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Controls */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-center gap-4">
+            {!interviewStarted ? (
+              <Button
+                onClick={startInterview}
+                disabled={isProcessing}
+                size="lg"
+                className="bg-green-600 hover:bg-green-700"
+              >
+                <Play className="w-4 h-4 mr-2" />
+                {isProcessing ? 'Starting...' : 'Start Interview'}
+              </Button>
+            ) : (
+              <>
+                {!isRecording ? (
+                  <Button
+                    onClick={startRecording}
+                    disabled={isProcessing}
+                    size="lg"
+                    className="bg-red-600 hover:bg-red-700"
+                  >
+                    <Video className="w-4 h-4 mr-2" />
+                    {isConversational ? 'Start Response' : 'Start Recording'}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={stopRecording}
+                    size="lg"
+                    variant="outline"
+                  >
+                    <Square className="w-4 h-4 mr-2" />
+                    Stop Recording
+                  </Button>
+                )}
+
+                <Button
+                  onClick={handleEndInterview}
+                  disabled={isAnalyzing}
+                  variant="outline"
+                  size="lg"
+                >
+                  <Brain className="w-4 h-4 mr-2" />
+                  {isAnalyzing ? 'Analyzing...' : 'End Interview'}
+                </Button>
+              </>
+            )}
+          </div>
+
+          {isProcessing && (
+            <div className="text-center mt-4 text-muted-foreground">
+              {isConversational ? 'Processing your response...' : 'Setting up interview...'}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+export default UnifiedInterviewSession;

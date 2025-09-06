@@ -1,0 +1,201 @@
+  // Enhanced end interview with JWT session validation
+  const handleEndInterview = useCallback(async () => {
+    console.log('handleEndInterview called');
+    stopFrameAnalysis();
+    setTimerActive(false);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+    }
+    
+    setIsAnalyzing(true);
+    setAnalysisProgress('Starting video processing...');
+    
+    try {
+      // Check database session validity before starting critical operations
+      const sessionValid = await ensureValidSession();
+      if (!sessionValid) {
+        console.log('Session validation failed, but continuing with upload...');
+        setAnalysisProgress('Session may have expired - video will be saved, please refresh the page after upload completes');
+      } else {
+        console.log('Session validated successfully, proceeding with upload and analysis');
+      }
+      
+      // Upload video to Google Cloud Storage if recorded
+      if (recordedBlob) {
+        console.log('Uploading video to Google Cloud Storage...');
+        const formData = new FormData();
+        formData.append('file', recordedBlob, `interview_${sessionId}_${Date.now()}.webm`);
+        formData.append('sessionId', sessionId);
+
+        const uploadResponse = await fetch('/api/upload/direct', {
+          method: 'POST',
+          body: formData,
+          credentials: 'include', // Include session cookies
+          headers: {
+            'X-Auth-Method': 'hybrid-session'
+          }
+        });
+
+        if (uploadResponse.ok) {
+          const { videoUri } = await uploadResponse.json();
+          console.log('Video uploaded successfully:', videoUri);
+          
+          // Create recording entry with video URI and update session status
+          console.log('Creating recording entry with video URI...');
+          await fetch(`/api/recordings`, {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'X-Auth-Method': 'hybrid-session'
+            },
+            credentials: 'include', // Include session cookies
+            body: JSON.stringify({
+              sessionId: sessionId,
+              url: videoUri,
+              durationSec: duration * 60, // Convert minutes to seconds
+              consent: true
+            })
+          });
+          
+          // Update session status to completed
+          await fetch(`/api/ai/session/${sessionId}`, {
+            method: 'PATCH',
+            headers: { 
+              'Content-Type': 'application/json',
+              'X-Auth-Method': 'hybrid-session'
+            },
+            credentials: 'include', // Include session cookies
+            body: JSON.stringify({ 
+              status: 'COMPLETED' 
+            })
+          });
+          console.log('Recording created and session updated');
+
+          // Save vision analysis frames
+          if (visionAnalysisData.length > 0) {
+            console.log(`Saving ${visionAnalysisData.length} vision analysis frames...`);
+            try {
+              await fetch('/api/vision/save-frames', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId, frames: visionAnalysisData }),
+              });
+              console.log('Vision analysis frames saved successfully.');
+            } catch (error) {
+              console.error('Failed to save vision analysis frames:', error);
+              // Don't block the main flow if this fails
+            }
+          }
+          
+          // Refresh session before triggering analysis
+          await fetch('/api/auth/session', { 
+            method: 'GET', 
+            credentials: 'same-origin',
+            headers: {
+              'Cache-Control': 'no-cache'
+            }
+          });
+          
+          // Trigger video analysis with enhanced retry logic and detailed error logging
+          try {
+            console.log('🔄 VIDEO FLOW - Attempting to trigger video analysis...');
+            setAnalysisProgress('Starting video analysis...');
+            
+            const fullGcsUri = `gs://${process.env.NEXT_PUBLIC_GCS_BUCKET_NAME}/${videoUri}`;
+            console.log(`[UnifiedInterviewSession] Triggering analysis for full GCS URI: ${fullGcsUri}`);
+
+            const analysisTriggered = await triggerVideoAnalysisWithRetry(
+              fullGcsUri,
+              sessionId,
+              3,
+              (message: string) => {
+                console.log(`🔄 VIDEO FLOW - Analysis progress: ${message}`);
+                setAnalysisProgress(message);
+              }
+            );
+            
+            console.log('✅ VIDEO FLOW - Video analysis trigger completed successfully');
+            setAnalysisProgress('Video analysis started successfully!');
+            // Instead of immediately completing, start polling for results
+            pollForAnalysisResults();
+          } catch (analysisError) {
+            // Detailed error logging
+            console.error('❌ VIDEO FLOW - Video analysis trigger failed:', analysisError);
+            
+            // Log error details
+            if (analysisError instanceof Error) {
+              console.error('❌ VIDEO FLOW - Error details:', {
+                name: analysisError.name,
+                message: analysisError.message,
+                stack: analysisError.stack
+              });
+            } else {
+              console.error('❌ VIDEO FLOW - Non-Error object thrown:', analysisError);
+            }
+            
+            // Don't fail the entire flow - video is uploaded
+            setAnalysisProgress('Video saved - analysis will continue in background');
+            
+            // Show user-friendly message
+            const errorMessage = analysisError instanceof Error ? analysisError.message : 'Unknown error';
+            console.log(`❌ VIDEO FLOW - Analysis failed but video saved: ${errorMessage}`);
+            
+            // Try API key fallback if available
+            const API_SECRET_KEY = process.env.NEXT_PUBLIC_API_SECRET_KEY;
+            if (API_SECRET_KEY) {
+              console.log('🔄 VIDEO FLOW - Attempting API key fallback for video analysis...');
+              try {
+                const response = await fetch('/api/video-analysis', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${API_SECRET_KEY}`
+                  },
+                  body: JSON.stringify({
+                    videoUri,
+                    sessionId,
+                    analysisType: 'comprehensive',
+                    retryAttempt: 1,
+                    isDirectApiKeyFallback: true
+                  })
+                });
+                
+                if (response.ok) {
+                  console.log('✅ VIDEO FLOW - API key fallback successful');
+                  setAnalysisProgress('Video analysis started with API key authentication');
+                } else {
+                  console.error('❌ VIDEO FLOW - API key fallback failed:', response.status);
+                  const errorText = await response.text();
+                  console.error('❌ VIDEO FLOW - API key fallback error details:', errorText);
+                }
+              } catch (fallbackError) {
+                console.error('❌ VIDEO FLOW - API key fallback exception:', fallbackError);
+              }
+            }
+          }
+        } else {
+          console.error('Video upload failed:', uploadResponse.status);
+          const errorText = await uploadResponse.text();
+          console.error('Upload error details:', errorText);
+          throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
+        }
+      }
+
+      // The onComplete call will now be handled by a separate mechanism
+      // that polls for analysis completion, so we remove the direct call from here
+      // to prevent premature redirection.
+      console.log('handleEndInterview finished, analysis is processing in the background.');
+      
+    } catch (error) {
+      console.error('Error in handleEndInterview:', error);
+      // Still call onComplete to ensure flow continues
+      onComplete?.({
+        sessionId,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+        hasVideo: !!recordedBlob,
+        hasConversation: isConversational && messages.length > 0,
+        messages: isConversational ? messages : []
+      });
+    }
+  }, [recordedBlob, sessionId, duration, messages, isConversational, onComplete, pollForAnalysisResults, stopFrameAnalysis, visionAnalysisData]);

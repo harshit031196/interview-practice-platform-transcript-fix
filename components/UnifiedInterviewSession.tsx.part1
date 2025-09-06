@@ -1,0 +1,216 @@
+'use client';
+
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
+import { Mic, MicOff, Video, VideoOff, Square, Send, MessageCircle, Brain, FileText, Clock, Play } from 'lucide-react';
+import { signIn, getSession, useSession } from 'next-auth/react';
+import { triggerVideoAnalysisWithRetry, ensureValidSession } from './VideoAnalysisHelper';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+  speakerSegments?: Array<{
+    speaker: string;
+    text: string;
+    startTime: number;
+    endTime: number;
+  }>;
+}
+
+interface UnifiedInterviewSessionProps {
+  sessionId: string;
+  interviewType: string;
+  difficulty: string;
+  duration: number;
+  isConversational: boolean;
+  onComplete?: (sessionData: any) => void;
+}
+
+function UnifiedInterviewSession({
+  sessionId,
+  interviewType,
+  difficulty,
+  duration,
+  isConversational,
+  onComplete
+}: UnifiedInterviewSessionProps) {
+  // Recording states
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  
+  // Conversational AI states
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [currentQuestion, setCurrentQuestion] = useState('');
+  const [analysisProgress, setAnalysisProgress] = useState<string>('');
+  const [isStreamReady, setIsStreamReady] = useState(false);
+  const [isPreparingStream, setIsPreparingStream] = useState(false);
+  const [analysisComplete, setAnalysisComplete] = useState(false);
+  const [interviewStarted, setInterviewStarted] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isInterviewFlowCompleted, setInterviewFlowCompleted] = useState(false);
+  const [isPolling, setIsPolling] = useState(false);
+  // Timer states
+  const [timeRemaining, setTimeRemaining] = useState(duration * 60); // Convert to seconds
+  const [timerActive, setTimerActive] = useState(false);
+  
+  // Media refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const visionAnalysisIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Vision API states
+  const [visionAnalysisData, setVisionAnalysisData] = useState<any[]>([]);
+
+  // Timer effect
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (timerActive && timeRemaining > 0) {
+      interval = setInterval(() => {
+        setTimeRemaining((prev) => {
+          if (prev <= 1) {
+            setTimerActive(false);
+            handleEndInterview();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [timerActive, timeRemaining]);
+
+  const pollForAnalysisResults = useCallback(() => {
+    if (isPolling) return;
+    setIsPolling(true);
+    console.log('🔄 [Polling] Starting to poll for analysis results...');
+
+    const intervalId = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/video-analysis/results/${sessionId}`);
+        if (response.ok) {
+          console.log('✅ [Polling] Video analysis complete!');
+          clearInterval(intervalId);
+          setIsPolling(false);
+
+          if (isConversational) {
+            setAnalysisProgress('Video analysis complete. Generating conversational feedback...');
+            try {
+              console.log('🔄 [Feedback] Triggering conversational feedback API...');
+              const feedbackResponse = await fetch('/api/ai/feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                  sessionId,
+                  conversationHistory: messages 
+                }),
+              });
+
+              if (feedbackResponse.ok) {
+                console.log('✅ [Feedback] Conversational feedback generated successfully.');
+                setAnalysisProgress('All analyses complete! Preparing results...');
+              } else {
+                console.error('❌ [Feedback] Conversational feedback API failed:', feedbackResponse.status);
+                setAnalysisProgress('Could not generate conversational feedback. Video results are available.');
+              }
+            } catch (error) {
+              console.error('❌ [Feedback] Error calling feedback API:', error);
+              setAnalysisProgress('An error occurred during conversational feedback generation.');
+            } finally {
+              setInterviewFlowCompleted(true);
+            }
+          } else {
+            setAnalysisProgress('Analysis complete! Preparing results...');
+            setInterviewFlowCompleted(true);
+          }
+        } else {
+          console.log('🔄 [Polling] Analysis not ready yet...');
+          setAnalysisProgress('Analysis in progress, this may take a few minutes...');
+        }
+      } catch (error) {
+        console.error('❌ [Polling] Error checking analysis status:', error);
+        clearInterval(intervalId);
+        setIsPolling(false);
+        setAnalysisProgress('Could not retrieve analysis status. You can check the feedback page later.');
+        setInterviewFlowCompleted(true); // Complete flow to avoid getting stuck
+      }
+    }, 5000);
+
+    // Safety timeout after 5 minutes
+    const timeoutId = setTimeout(() => {
+      clearInterval(intervalId);
+      if (isPolling) {
+        console.log('⌛️ [Polling] Polling timed out.');
+        setIsPolling(false);
+        setAnalysisProgress('Analysis is taking longer than expected. Please check the feedback page later.');
+        setInterviewFlowCompleted(true); // Complete flow to avoid getting stuck
+      }
+    }, 300000);
+
+    return () => {
+      clearInterval(intervalId);
+      clearTimeout(timeoutId);
+    };
+  }, [isPolling, sessionId, messages, isConversational]);
+
+  const analyzeFrame = useCallback(async () => {
+    if (!videoRef.current || videoRef.current.paused || videoRef.current.ended) {
+      return;
+    }
+
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext('2d');
+    
+    if (context) {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageDataUrl = canvas.toDataURL('image/jpeg');
+
+      try {
+        console.log('📸 [Vision] Capturing and analyzing frame...');
+        const response = await fetch('/api/vision/analyze-frame', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            image: imageDataUrl,
+            sessionId: sessionId 
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success) {
+            setVisionAnalysisData(prevData => [...prevData, { timestamp: Date.now(), ...data }]);
+            console.log('✅ [Vision] Frame analysis successful');
+          }
+        } else {
+          console.error('❌ [Vision] Frame analysis API failed:', response.status);
+        }
+      } catch (error) {
+        console.error('❌ [Vision] Error sending frame for analysis:', error);
+      }
+    }
+  }, [sessionId]);
+
+  const startFrameAnalysis = useCallback(() => {
+    if (visionAnalysisIntervalRef.current) return; // Already running
+    visionAnalysisIntervalRef.current = setInterval(analyzeFrame, 5000);
+    console.log('▶️ [Vision] Started frame analysis.');
+  }, [analyzeFrame]);
+
+  const stopFrameAnalysis = useCallback(() => {
+    if (visionAnalysisIntervalRef.current) {
+      clearInterval(visionAnalysisIntervalRef.current);
+      visionAnalysisIntervalRef.current = null;
+      console.log('⏹️ [Vision] Stopped frame analysis.');
+    }
+  }, []);
