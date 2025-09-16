@@ -1,8 +1,19 @@
 [
-    {
-        "origin": ["*"],
-        "method": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "responseHeader": ["Content-Type", "Access-Control-Allow-Origin"],
-        "maxAgeSeconds": 3600
-    }
+  {
+    "origin": ["*"],
+    "method": ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Range",
+      "Range",
+      "X-Upload-Content-Type",
+      "X-Upload-Content-Length",
+      "X-Goog-Upload-Command",
+      "X-Goog-Upload-Header-Name",
+      "X-Goog-Upload-Header-Value",
+      "X-Goog-Upload-Protocol",
+      "Access-Control-Allow-Origin"
+    ],
+    "maxAgeSeconds": 3600
+  }
 ]

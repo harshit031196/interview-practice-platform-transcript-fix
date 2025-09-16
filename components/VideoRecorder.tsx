@@ -45,7 +45,10 @@ export function VideoRecorder({ sessionId, onUploadComplete, onUploadError }: Vi
       }
 
       const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'video/webm;codecs=vp9,opus'
+        mimeType: 'video/webm;codecs=vp9,opus',
+        // Reduce bitrates to keep file sizes manageable for >3 minute videos
+        videoBitsPerSecond: 1_200_000, // ~1.2 Mbps
+        audioBitsPerSecond: 64_000     // 64 Kbps
       })
 
       const chunks: BlobPart[] = []
@@ -103,24 +106,68 @@ export function VideoRecorder({ sessionId, onUploadComplete, onUploadError }: Vi
     setUploadStatus('uploading')
 
     try {
-      // Direct upload to our API endpoint
-      const formData = new FormData()
-      formData.append('file', recordedBlob, `interview_${sessionId}_${Date.now()}.webm`)
-      formData.append('sessionId', sessionId)
+      const fileName = `interview_${sessionId}_${Date.now()}.webm`
+      const contentType = recordedBlob.type || 'video/webm'
+      const SIZE_THRESHOLD = 20 * 1024 * 1024 // 20 MB safety threshold (Cloud Run ~32MB limit)
 
-      const uploadResponse = await fetch('/api/upload/direct', {
-        method: 'POST',
-        body: formData
-      })
+      if (recordedBlob.size > SIZE_THRESHOLD) {
+        // Large file: use V4 signed PUT URL for direct-to-GCS upload from browser
+        const createRes = await fetch('/api/upload/signed-put', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ sessionId, filename: fileName, contentType })
+        })
+        if (!createRes.ok) {
+          const errText = await createRes.text()
+          throw new Error(`Failed to init signed upload: ${errText}`)
+        }
+        const { signedUrl, filename, gcsUri } = await createRes.json()
 
-      if (!uploadResponse.ok) {
-        const error = await uploadResponse.json()
-        throw new Error(error.error || 'Failed to upload video')
+        // Upload bytes directly to GCS using the signed URL
+        const putRes = await fetch(signedUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': contentType },
+          body: recordedBlob
+        })
+        if (!putRes.ok) {
+          const errText = await putRes.text()
+          throw new Error(`GCS upload failed: ${putRes.status} ${errText}`)
+        }
+
+        // Confirm upload and persist DB record
+        await fetch('/api/upload/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ sessionId, filename, gcsUri })
+        }).catch(e => console.warn('Confirm upload failed (non-fatal):', e))
+
+        setUploadStatus('success')
+        onUploadComplete?.(filename)
+      } else {
+        // Small/medium file: use existing direct upload path via API
+        const formData = new FormData()
+        formData.append('file', recordedBlob, fileName)
+        formData.append('sessionId', sessionId)
+
+        const uploadResponse = await fetch('/api/upload/direct', {
+          method: 'POST',
+          body: formData,
+          // Ensure auth cookies (NextAuth) are sent so server can authenticate the request
+          credentials: 'include',
+          headers: { 'X-Auth-Method': 'hybrid-session' }
+        })
+
+        if (!uploadResponse.ok) {
+          const error = await uploadResponse.json()
+          throw new Error(error.error || 'Failed to upload video')
+        }
+
+        const result = await uploadResponse.json()
+        setUploadStatus('success')
+        onUploadComplete?.(result.filename)
       }
-
-      const result = await uploadResponse.json()
-      setUploadStatus('success')
-      onUploadComplete?.(result.filename)
 
     } catch (error) {
       console.error('Upload error:', error)

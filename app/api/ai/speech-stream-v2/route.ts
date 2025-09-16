@@ -9,9 +9,8 @@ import { PassThrough } from 'stream';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Initialize Speech-to-Text client with increased timeout settings
+// Initialize Speech-to-Text client with increased timeout settings (ADC)
 const speechClient = new SpeechClient({
-  projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'wingman-interview-470419',
   apiEndpoint: 'speech.googleapis.com',
   // Increased timeout to reduce DEADLINE_EXCEEDED/408 for longer answers (10 minutes)
   timeout: 600000,
@@ -79,8 +78,9 @@ async function getAuthenticatedUserId(request: NextRequest): Promise<string | un
   
   // If no JWT or session, check for database session directly
   if (!userId) {
-    // Check standard session token first
-    let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+    // Check session token (support secure and non-secure cookie names)
+    let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+      || request.cookies.get('next-auth.session-token')?.value;
     
     // If not found, check for database-specific session token (for hybrid fallback)
     if (!sessionToken) {

@@ -108,18 +108,22 @@ export default function ExpertsPage() {
     ];
 
     setTimeout(() => {
-      setExperts(dummyExperts);
+      // Force no availability for all experts per requirement
+      const normalized = dummyExperts.map(e => ({ ...e, nextSlots: [] as Expert['nextSlots'] }))
+      setExperts(normalized);
       setIsLoading(false);
     }, 1000);
   }, []);
 
-  const filteredExperts = experts?.filter(expert =>
-    expert.name.toLowerCase().includes(filters.search.toLowerCase()) ||
-    expert.bio.toLowerCase().includes(filters.search.toLowerCase()) ||
-    expert.expertiseTags.some(tag => 
-      tag.toLowerCase().includes(filters.search.toLowerCase())
-    )
-  ) || []
+  const filteredExperts = (experts || []).filter(expert => {
+    const q = filters.search.toLowerCase();
+    const matchesSearch = !q ||
+      expert.name.toLowerCase().includes(q) ||
+      expert.bio.toLowerCase().includes(q) ||
+      expert.expertiseTags.some(tag => tag.toLowerCase().includes(q));
+    const matchesTag = !filters.tags || expert.expertiseTags.some(tag => tag.toLowerCase() === filters.tags.toLowerCase());
+    return matchesSearch && matchesTag;
+  })
 
   const handleBookExpert = (expertId: string) => {
     // Navigate to expert detail page

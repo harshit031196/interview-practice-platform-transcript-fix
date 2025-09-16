@@ -54,44 +54,129 @@ function VideoAnalysisPageContent() {
     try {
       // Use provided session ID or create one
       const currentSessionId = sessionId || `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      
-      // Get signed upload URL
-      const uploadResponse = await fetch('/api/upload/signed-url', {
+
+      // Step 1: Create a resumable upload session via our API (server holds creds)
+      const createRes = await fetch('/api/upload/resumable', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          filename: `analysis-${Date.now()}-${file.name}`,
+          sessionId: currentSessionId,
+          filename: file.name,
           contentType: file.type,
-          sessionId: currentSessionId
         })
       });
+      if (!createRes.ok) throw new Error('Failed to create resumable upload session');
+      const { uploadUrl, filename, gcsUri } = await createRes.json();
 
-      if (!uploadResponse.ok) {
-        throw new Error('Failed to get upload URL');
-      }
-
-      const { signedUrl, filename } = await uploadResponse.json();
       setAnalysisState({ status: 'uploading', progress: 30 });
 
-      // Upload file to Google Cloud Storage
-      const uploadFileResponse = await fetch(signedUrl, {
-        method: 'PUT',
-        body: file,
-        headers: {
-          'Content-Type': file.type
+      // Helpers for resumable chunked upload
+      const parseRange = (rangeHeader: string | null): number => {
+        if (!rangeHeader) return -1
+        const m = rangeHeader.match(/bytes=(\d+)-(\d+)/)
+        if (!m) return -1
+        const last = parseInt(m[2], 10)
+        return Number.isFinite(last) ? last : -1
+      }
+      const queryOffset = async (url: string, total: number): Promise<number> => {
+        try {
+          const res = await fetch(url, { method: 'PUT', headers: { 'Content-Range': `bytes */${total}` } })
+          if (res.status === 308) {
+            const last = parseRange(res.headers.get('Range'))
+            return last >= 0 ? last + 1 : 0
+          }
+          if (res.status === 200 || res.status === 201) return total
+          return 0
+        } catch {
+          return 0
         }
-      });
-
-      if (!uploadFileResponse.ok) {
-        throw new Error('Failed to upload video');
+      }
+      const uploadResumableInChunks = async (url: string, f: File, onProgress: (p: number) => void) => {
+        const total = f.size
+        const chunkSize = 8 * 1024 * 1024 // 8 MiB
+        let offset = 0
+        // Try to resume if server already has some data
+        offset = await queryOffset(url, total)
+        onProgress(Math.max(31, Math.round((offset / total) * 50) + 30))
+        while (offset < total) {
+          const end = Math.min(offset + chunkSize, total) - 1
+          const chunk = f.slice(offset, end + 1)
+          let attempts = 0
+          while (true) {
+            try {
+              const res = await fetch(url, {
+                method: 'PUT',
+                headers: {
+                  'Content-Type': f.type,
+                  'Content-Range': `bytes ${offset}-${end}/${total}`,
+                },
+                body: chunk,
+              })
+              if (res.status === 308) {
+                const last = parseRange(res.headers.get('Range'))
+                offset = last >= 0 ? last + 1 : end + 1
+                onProgress(Math.min(80, Math.max(31, Math.round((offset / total) * 50) + 30)))
+                break
+              } else if (res.status === 200 || res.status === 201) {
+                offset = total
+                onProgress(85)
+                return
+              } else {
+                const txt = await res.text().catch(() => '')
+                throw new Error(`Unexpected status ${res.status}: ${txt}`)
+              }
+            } catch (err) {
+              // Network error like broken pipe; query server for committed offset and retry
+              attempts++
+              if (attempts > 3) throw err
+              const newOffset = await queryOffset(url, total)
+              if (newOffset > offset) {
+                offset = newOffset
+                onProgress(Math.min(80, Math.max(31, Math.round((offset / total) * 50) + 30)))
+                break // proceed to next chunk
+              }
+              // Exponential backoff before retrying the same chunk
+              await new Promise((r) => setTimeout(r, attempts * 500))
+            }
+          }
+        }
       }
 
-      setAnalysisState({ status: 'uploading', progress: 50 });
-      
-      // Return the GCS URI and session ID
-      const bucketName = process.env.NEXT_PUBLIC_GOOGLE_CLOUD_BUCKET_NAME || 'wingman-interview-videos-1756476470';
-      const videoUri = `gs://${bucketName}/${filename}`;
-      return { videoUri, sessionId: currentSessionId };
+      // Step 2: Upload in chunks with resume support
+      await uploadResumableInChunks(uploadUrl, file, (p) => setAnalysisState({ status: 'uploading', progress: p }))
+      setAnalysisState({ status: 'uploading', progress: 60 })
+
+      // Step 3: Confirm upload to persist recording entry and fetch metadata
+      let verified = false
+      try {
+        const confirmRes = await fetch('/api/upload/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: currentSessionId, filename, gcsUri })
+        });
+        if (confirmRes.ok) {
+          const body = await confirmRes.json().catch(() => null)
+          const meta = body?.metadata as { size?: number; contentType?: string } | undefined
+          if (meta) {
+            // Verify size matches exactly and contentType is a video/*
+            if (typeof meta.size === 'number' && meta.size !== file.size) {
+              throw new Error(`Uploaded size (${meta.size}) does not match local file size (${file.size}). Please retry.`)
+            }
+            if (typeof meta.contentType === 'string' && !meta.contentType.toLowerCase().startsWith('video/')) {
+              throw new Error(`Uploaded object contentType is '${meta.contentType}', expected a video/* type.`)
+            }
+            verified = true
+          }
+        }
+      } catch (e) {
+        console.warn('Upload verification warning:', e)
+        // Non-fatal: proceed but mark unverified
+      }
+
+      setAnalysisState({ status: 'uploading', progress: verified ? 70 : 65 })
+
+      // Return the GCS URI and session ID for analysis
+      return { videoUri: gcsUri as string, sessionId: currentSessionId };
 
     } catch (error) {
       console.error('Upload error:', error);

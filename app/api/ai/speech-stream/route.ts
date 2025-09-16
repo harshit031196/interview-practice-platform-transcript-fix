@@ -9,9 +9,9 @@ import { Storage } from '@google-cloud/storage';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Initialize clients
-const speechClient = new SpeechClient({ projectId: 'wingman-interview-470419' });
-const storage = new Storage({ projectId: 'wingman-interview-470419' });
+// Initialize clients via Application Default Credentials
+const speechClient = new SpeechClient();
+const storage = new Storage();
 const bucketName = process.env.NEXT_PUBLIC_GCS_BUCKET_NAME || 'wingman-interview-videos-harshit-2024';
 
 export async function POST(request: NextRequest) {
@@ -29,8 +29,9 @@ export async function POST(request: NextRequest) {
     
     // If no JWT or session, check for database session directly
     if (!userId) {
-      // Check standard session token first
-      let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+      // Check session token (support secure and non-secure cookie names)
+      let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+        || request.cookies.get('next-auth.session-token')?.value;
       
       // If not found, check for database-specific session token (for hybrid fallback)
       if (!sessionToken) {
@@ -125,8 +126,10 @@ export async function POST(request: NextRequest) {
       const tempFileName = `temp-audio/${sessionId}-${Date.now()}.webm`;
       const file = storage.bucket(bucketName).file(tempFileName);
 
-      // Upload to GCS
+      // Upload to GCS (force simple upload to avoid AbortSignal issues with resumable)
       await file.save(audioBuffer, {
+        resumable: false,
+        validation: false,
         metadata: { contentType: 'audio/webm' },
       });
 

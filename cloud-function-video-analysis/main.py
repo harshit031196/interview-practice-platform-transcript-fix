@@ -32,6 +32,16 @@ class VideoAnalysisService:
         self.vision_client = vision.ImageAnnotatorClient()
         self.video_client = videointelligence.VideoIntelligenceServiceClient()
 
+    def _parse_gs_uri(self, gs_uri: str):
+        """Parse a gs://bucket/path/to/object URI into (bucket, object_name)."""
+        if not gs_uri or not gs_uri.startswith('gs://'):
+            raise ValueError(f"Invalid GCS URI: {gs_uri}")
+        without_scheme = gs_uri[len('gs://'):]  # bucket/obj
+        parts = without_scheme.split('/', 1)
+        if len(parts) == 1:
+            return parts[0], ''
+        return parts[0], parts[1]
+
     async def analyze_video_comprehensive(self, video_uri: str) -> Dict[str, Any]:
         """
         Perform comprehensive analysis of video including speech, facial expressions, and confidence metrics.
@@ -150,9 +160,10 @@ class VideoAnalysisService:
         
         try:
             # Download video temporarily for frame extraction
-            bucket = self.storage_client.bucket(BUCKET_NAME)
-            blob_name = video_uri.split('/')[-1]
-            blob = bucket.blob(blob_name)
+            # Parse full object path from gs:// URI
+            bkt_name, obj_name = self._parse_gs_uri(video_uri)
+            bucket = self.storage_client.bucket(bkt_name)
+            blob = bucket.blob(obj_name)
             
             with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_video:
                 blob.download_to_filename(temp_video.name)
@@ -219,9 +230,9 @@ class VideoAnalysisService:
         
         try:
             # Download video temporarily
-            bucket = self.storage_client.bucket(BUCKET_NAME)
-            blob_name = video_uri.split('/')[-1]
-            blob = bucket.blob(blob_name)
+            bkt_name, obj_name = self._parse_gs_uri(video_uri)
+            bucket = self.storage_client.bucket(bkt_name)
+            blob = bucket.blob(obj_name)
             
             with tempfile.NamedTemporaryFile(suffix='.webm', delete=False) as temp_video:
                 blob.download_to_filename(temp_video.name)

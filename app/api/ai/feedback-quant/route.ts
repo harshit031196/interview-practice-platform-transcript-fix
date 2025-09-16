@@ -64,19 +64,46 @@ function extractTranscriptFromAny(obj: any): string | null {
 function minifyJson(obj: any): string { return JSON.stringify(obj) }
 function clampInt(n: any, lo: number, hi: number): number { n = Math.round(Number(n) || 0); return Math.max(lo, Math.min(hi, n)); }
 
-async function getScorePlain(vertex: VertexAI, model: string, aspect: string, transcript: string, interviewType?: string): Promise<{score: number | null, finish?: string, visible?: number}> {
+async function getScorePlain(
+  vertex: VertexAI,
+  model: string,
+  aspect: string,
+  transcript: string,
+  interviewType?: string,
+  opts?: { forChunk?: boolean }
+): Promise<{score: number | null, finish?: string, visible?: number}> {
   const generationConfig: any = {
-    maxOutputTokens: 64,
+    maxOutputTokens: 128,
     temperature: 0.0,
     topP: 0.9,
     responseMimeType: 'text/plain',
   }
+  const guidelines = [
+    'Guidelines:',
+    '- Base the score on the entire transcript; consider both strengths and weaknesses.',
+    '- Do not over-penalize minor filler words or brief pauses.',
+    // For chunked prompts, avoid pushing to mid-range just for being short
+    ...(opts?.forChunk
+      ? ['- Do NOT default to mid-range just because the excerpt is short; score based on the evidence present.']
+      : ['- If content is limited but not incorrect, keep within 5–7 unless clearly poor.']
+    ),
+    '- Consider the interview type (behavioral, technical, system, product) when judging depth and structure.',
+  ].join('\n')
   const prompt = [
-    `You are scoring one metric: ${aspect}.`,
-    'Rules:',
-    '- Return EXACTLY one line containing a JSON object: {"score10": N}',
-    '- N must be an integer from 0 to 10.',
-    '- Do NOT include any other text, labels, or code fences.',
+    `You are an expert interviewer. Score ONE metric (0-10, integer): ${aspect}.`,
+    '',
+    'Calibration (use this scale distribution):',
+    '- 9–10: Outstanding: clear evidence throughout; precise, confident, and complete.',
+    '- 7–8: Strong/typical good candidate: generally clear with minor gaps.',
+    '- 5–6: Acceptable/average baseline: somewhat mixed but adequate.',
+    '- 3–4: Below average: several issues or missing elements.',
+    '- 0–2: Poor: largely missing, incorrect, or incoherent.',
+    '',
+    guidelines,
+    '',
+    'Output format:',
+    '- Return EXACTLY one line JSON: {"score10": N} (N is an integer 0–10).',
+    '- No extra text, labels, or code fences.',
     '',
     `INTERVIEW_TYPE: ${interviewType || 'general'}`,
     'TRANSCRIPT:',
@@ -111,20 +138,42 @@ async function getScorePlain(vertex: VertexAI, model: string, aspect: string, tr
   }
 }
 
-async function getScoreChunked(vertex: VertexAI, aspect: string, transcript: string, interviewType?: string): Promise<number | null> {
+async function getScoreChunked(
+  vertex: VertexAI,
+  aspect: string,
+  transcript: string,
+  interviewType?: string,
+  model: string = MODEL
+): Promise<number | null> {
   const chunks: string[] = []
-  const size = 350
-  for (let i = 0; i < transcript.length; i += size) chunks.push(transcript.slice(i, i + size))
-  const scores: number[] = []
-  for (const ch of chunks) {
-    // Try primary model then fallback
-    const one = await getScorePlain(vertex, MODEL, aspect, ch, interviewType)
-    if (typeof one.score === 'number') { scores.push(one.score); continue }
-    const fb = await getScorePlain(vertex, 'gemini-2.0-flash-lite', aspect, ch, interviewType)
-    if (typeof fb.score === 'number') scores.push(fb.score)
+  const size = 2500
+  const overlap = 250
+  for (let i = 0; i < transcript.length; i += (size - overlap)) {
+    const ch = transcript.slice(i, Math.min(i + size, transcript.length))
+    if (ch) chunks.push(ch)
   }
-  if (!scores.length) return null
-  const avg = Math.round(scores.reduce((a,b)=>a+b,0) / scores.length)
+  const scored: Array<{ s: number; w: number }> = []
+  for (let idx = 0; idx < chunks.length; idx++) {
+    const ch = chunks[idx]
+    // Try primary model then fallback
+    const one = await getScorePlain(vertex, model, aspect, ch, interviewType, { forChunk: true })
+    if (typeof one.score === 'number') {
+      console.log(`[quant] chunk ${idx + 1}/${chunks.length} len=${ch.length} model=${model} score=${one.score}`)
+      scored.push({ s: one.score, w: ch.length })
+      continue
+    }
+    const fbModel = 'gemini-2.0-flash-lite'
+    const fb = await getScorePlain(vertex, fbModel, aspect, ch, interviewType, { forChunk: true })
+    if (typeof fb.score === 'number') {
+      console.log(`[quant] chunk ${idx + 1}/${chunks.length} len=${ch.length} model=${fbModel} score=${fb.score}`)
+      scored.push({ s: fb.score, w: ch.length })
+    } else {
+      console.log(`[quant] chunk ${idx + 1}/${chunks.length} len=${ch.length} both-models-failed`)
+    }
+  }
+  if (!scored.length) return null
+  const sumW = scored.reduce((a, x) => a + x.w, 0)
+  const avg = Math.round(scored.reduce((a, x) => a + x.s * (x.w / (sumW || 1)), 0))
   return clampInt(avg, 0, 10)
 }
 
@@ -146,9 +195,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing or too-short transcript' }, { status: 400 })
     }
 
-    // Trim for prompt; we will still store full transcript in DB
-    const limit = 1200
-    const promptTranscript = transcript.length > limit ? transcript.slice(0, limit) : transcript
+    // Use the FULL transcript for scoring; chunking will handle long inputs safely
+    const promptTranscript = transcript
 
     const vertex = new VertexAI({ project: PROJECT_ID, location: DEFAULT_LOCATION })
 
@@ -163,25 +211,48 @@ export async function POST(req: NextRequest) {
     const results: Record<string, number> = {}
     const statuses: Record<string, any> = {}
 
+    const MAX_SINGLE = 8000
     for (const a of aspects) {
-      // Try primary model text/plain
-      const r1 = await getScorePlain(vertex, MODEL, a.prompt, promptTranscript.slice(0, 800), interviewType)
-      console.log(`[quant] aspect=${a.key} model=${MODEL} finish=${r1.finish || 'n/a'} visible=${r1.visible ?? 0} score=${r1.score ?? 'null'}`)
-      let score = r1.score
-      // Fallback model
-      if (score == null) {
-        const r2 = await getScorePlain(vertex, 'gemini-2.0-flash-lite', a.prompt, promptTranscript.slice(0, 600), interviewType)
-        console.log(`[quant] aspect=${a.key} model=gemini-2.0-flash-lite finish=${r2.finish || 'n/a'} visible=${r2.visible ?? 0} score=${r2.score ?? 'null'}`)
-        score = r2.score
-      }
-      // Chunked fallback
-      if (score == null) {
-        score = await getScoreChunked(vertex, a.prompt, promptTranscript, interviewType)
-        console.log(`[quant] aspect=${a.key} chunked score=${score ?? 'null'}`)
+      let score: number | null = null
+      let usedMode = 'none'
+
+      if (promptTranscript.length <= MAX_SINGLE) {
+        // Prefer single-shot for medium transcripts
+        const r1 = await getScorePlain(vertex, MODEL, a.prompt, promptTranscript, interviewType)
+        console.log(`[quant] aspect=${a.key} single model=${MODEL} finish=${r1.finish || 'n/a'} visible=${r1.visible ?? 0} score=${r1.score ?? 'null'} (len=${promptTranscript.length})`)
+        score = r1.score
+        usedMode = 'single'
+        if (score == null) {
+          const r2 = await getScorePlain(vertex, 'gemini-2.0-flash-lite', a.prompt, promptTranscript, interviewType)
+          console.log(`[quant] aspect=${a.key} single model=gemini-2.0-flash-lite finish=${r2.finish || 'n/a'} visible=${r2.visible ?? 0} score=${r2.score ?? 'null'} (len=${promptTranscript.length})`)
+          score = r2.score
+        }
+        if (score == null) {
+          // Fallback to chunked aggregation
+          score = await getScoreChunked(vertex, a.prompt, promptTranscript, interviewType)
+          usedMode = 'singleThenChunked'
+          console.log(`[quant] aspect=${a.key} chunked score=${score ?? 'null'} (fallback, len=${promptTranscript.length})`)
+        }
+      } else {
+        // Long transcript: try single-shot once, then chunk if needed
+        const r1 = await getScorePlain(vertex, MODEL, a.prompt, promptTranscript, interviewType)
+        console.log(`[quant] aspect=${a.key} single-long model=${MODEL} finish=${r1.finish || 'n/a'} visible=${r1.visible ?? 0} score=${r1.score ?? 'null'} (len=${promptTranscript.length})`)
+        score = r1.score
+        usedMode = 'singleLong'
+        if (score == null) {
+          const r2 = await getScorePlain(vertex, 'gemini-2.0-flash-lite', a.prompt, promptTranscript, interviewType)
+          console.log(`[quant] aspect=${a.key} single-long model=gemini-2.0-flash-lite finish=${r2.finish || 'n/a'} visible=${r2.visible ?? 0} score=${r2.score ?? 'null'} (len=${promptTranscript.length})`)
+          score = r2.score
+        }
+        if (score == null) {
+          score = await getScoreChunked(vertex, a.prompt, promptTranscript, interviewType)
+          usedMode = 'chunked'
+          console.log(`[quant] aspect=${a.key} chunked score=${score ?? 'null'} (full transcript, len=${promptTranscript.length})`)
+        }
       }
       if (score == null) score = 0
       results[a.key] = score
-      statuses[a.key] = { ok: score !== 0, used: score != null ? (r1.score != null ? MODEL : 'gemini-2.0-flash-lite') : 'none', loc: DEFAULT_LOCATION }
+      statuses[a.key] = { ok: score !== 0, used: usedMode, loc: DEFAULT_LOCATION }
     }
 
     const contentFeedback = minifyJson(results)

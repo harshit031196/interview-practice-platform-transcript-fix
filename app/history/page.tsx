@@ -260,12 +260,6 @@ export default function InterviewHistoryPage() {
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <h2 className="text-2xl font-bold text-gray-900">Your Interview Sessions</h2>
-            <Link href="/practice/ai/analysis">
-              <Button>
-                <Video className="w-4 h-4 mr-2" />
-                Analyze New Video
-              </Button>
-            </Link>
           </div>
 
           {sessions.length === 0 ? (
@@ -331,24 +325,24 @@ export default function InterviewHistoryPage() {
                             <Clock className="w-4 h-4 mr-1.5" />
                             {formatDuration(session.duration)}
                           </div>
-                        </div>
                         <div className="flex items-center gap-4">
                           <div className="flex items-center gap-2 text-xs text-gray-600">
-                            <span className="px-2 py-0.5 rounded border">LLM: {llmScore10 != null ? `${llmScore10}/10` : 'N/A'}</span>
+                            <span className="px-2 py-0.5 rounded border">SuperAI: {llmScore10 != null ? `${llmScore10}/10` : 'N/A'}</span>
                             <span className="px-2 py-0.5 rounded border">WPM: {wpm != null ? `${wpm}` : 'N/A'}</span>
                             <span className="px-2 py-0.5 rounded border">Filler: {filler != null ? `${filler}` : 'N/A'}</span>
                             <span className="px-2 py-0.5 rounded border">Clarity: {clarity != null ? `${clarity}` : 'N/A'}</span>
                             <span className="px-2 py-0.5 rounded border">Conf: {confidencePct != null ? `${confidencePct}%` : 'N/A'}</span>
                           </div>
                           {scoreData && (
-                             <div className="text-right">
-                               <p className={`text-xl font-bold ${getScoreColor(scoreData.grade)}`}>{scoreData.grade}</p>
-                               <p className="text-sm text-gray-500">{scoreData.score}%</p>
-                             </div>
+                            <div className="text-right">
+                              <p className={`text-xl font-bold ${getScoreColor(scoreData.grade)}`}>{scoreData.grade}</p>
+                              <p className="text-sm text-gray-500">{scoreData.score}%</p>
+                            </div>
                           )}
                           <Button variant="outline" size="sm" asChild>
                             <Link href={`/history/${session.id}`}>View Report</Link>
                           </Button>
+                        </div>
                         </div>
                       </div>
 

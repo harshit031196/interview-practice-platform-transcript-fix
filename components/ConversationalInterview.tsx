@@ -51,12 +51,23 @@ export default function ConversationalInterview({
   const startInterview = useCallback(async () => {
     setIsProcessing(true);
     try {
+      const mapRole = (type: string, incoming?: string) => {
+        const t = (type || '').toLowerCase();
+        if (t === 'product') return 'Product Manager';
+        if (t === 'technical' || t === 'system-design' || t === 'system design') return 'Software Engineer';
+        // behavioral: respect explicit incoming if it clearly states PM or SWE
+        const r = (incoming || '').toLowerCase();
+        if (/product\s*manager|\bpm\b/.test(r)) return 'Product Manager';
+        if (/software\s*(engineer|developer)|\bswe\b|\bsde\b/.test(r)) return 'Software Engineer';
+        return 'Software Engineer or Product Manager';
+      };
+      const effectiveJobRole = mapRole(interviewType, jobRole);
       const response = await fetch('/api/ai/interviewer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId,
-          jobRole,
+          jobRole: effectiveJobRole,
           company,
           interviewType,
           conversationHistory: []
@@ -179,6 +190,16 @@ export default function ConversationalInterview({
               setMessages(updatedMessages);
 
               // Get AI response
+              const mapRole = (type: string, incoming?: string) => {
+                const t = (type || '').toLowerCase();
+                if (t === 'product') return 'Product Manager';
+                if (t === 'technical' || t === 'system-design' || t === 'system design') return 'Software Engineer';
+                const r = (incoming || '').toLowerCase();
+                if (/product\s*manager|\bpm\b/.test(r)) return 'Product Manager';
+                if (/software\s*(engineer|developer)|\bswe\b|\bsde\b/.test(r)) return 'Software Engineer';
+                return 'Software Engineer or Product Manager';
+              };
+              const effectiveJobRole = mapRole(interviewType, jobRole);
               const aiResponse = await fetch('/api/ai/interviewer', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -189,7 +210,7 @@ export default function ConversationalInterview({
                     content: m.content
                   })),
                   sessionId,
-                  jobRole,
+                  jobRole: effectiveJobRole,
                   company,
                   interviewType
                 })
@@ -225,13 +246,23 @@ export default function ConversationalInterview({
         .map(m => `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`)
         .join('\n\n');
 
+      const mapRole = (type: string, incoming?: string) => {
+        const t = (type || '').toLowerCase();
+        if (t === 'product') return 'Product Manager';
+        if (t === 'technical' || t === 'system-design' || t === 'system design') return 'Software Engineer';
+        const r = (incoming || '').toLowerCase();
+        if (/product\s*manager|\bpm\b/.test(r)) return 'Product Manager';
+        if (/software\s*(engineer|developer)|\bswe\b|\bsde\b/.test(r)) return 'Software Engineer';
+        return 'Software Engineer or Product Manager';
+      };
+      const effectiveJobRole = mapRole(interviewType, jobRole);
       const feedbackResponse = await fetch('/api/ai/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversationTranscript,
           sessionId,
-          jobRole,
+          jobRole: effectiveJobRole,
           company,
           interviewType
         })
@@ -249,7 +280,7 @@ export default function ConversationalInterview({
             sessionId,
             transcript: conversationTranscript,
             analysis: feedbackData.analysis,
-            jobRole,
+            jobRole: effectiveJobRole,
             company,
             interviewType,
             isConversational: true

@@ -1,0 +1,27 @@
+# Minimal Prisma migrator image for Cloud Run Job
+# Uses Node base (includes npm/npx) and installs prisma CLI + @prisma/client
+FROM node:20-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install OpenSSL for Prisma engine compatibility
+RUN apt-get update -y \
+  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Copy only Prisma schema and migrations to keep image small
+COPY prisma ./prisma
+
+# Initialize a minimal package.json and install exact Prisma versions matching the app
+# This ensures engine compatibility with your schema and migrations
+RUN npm init -y \
+  && npm install prisma@5.8.1 @prisma/client@5.8.1 \
+  && npm cache clean --force
+
+# Environment variables are injected at job runtime; DATABASE_URL must be provided via Secret Manager
+# Optional: explicitly set where Prisma looks for the schema
+ENV PRISMA_SCHEMA_PATH=/app/prisma/schema.prisma
+
+# Default command runs migrations
+CMD ["npx", "prisma", "migrate", "deploy"]

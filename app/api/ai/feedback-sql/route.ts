@@ -8,10 +8,9 @@ import { VertexAI } from '@google-cloud/vertexai';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Initialize Vertex AI similar to /api/ai/feedback
+// Vertex AI config; client will be created lazily in handler
 const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID || 'wingman-interview-470419';
 const DEFAULT_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
-const vertex_ai = new VertexAI({ project: PROJECT_ID, location: DEFAULT_LOCATION });
 
 const ENV_MODEL = process.env.VERTEX_GEMINI_MODEL || process.env.GEMINI_MODEL;
 // Prefer gemini-2.5-flash; ignore ENV_MODEL if it's a 1.5 variant to avoid NOT_FOUND
@@ -94,7 +93,17 @@ function buildSqlPrompt(input: {
   company?: string;
   interviewType?: string;
 }): string {
-  const { sessionId, transcript, jobRole = 'Software Engineer', company = 'FAANG', interviewType = 'behavioral' } = input;
+  const { sessionId, transcript, jobRole: incomingJobRole = 'Software Engineer', company = 'FAANG', interviewType = 'behavioral' } = input;
+  const mapRole = (type: string, incoming?: string) => {
+    const t = (type || '').toLowerCase();
+    if (t === 'product') return 'Product Manager';
+    if (t === 'technical' || t === 'system-design' || t === 'system design') return 'Software Engineer';
+    const r = (incoming || '').toLowerCase();
+    if (/product\s*manager|\bpm\b/.test(r)) return 'Product Manager';
+    if (/software\s*(engineer|developer)|\bswe\b|\bsde\b/.test(r)) return 'Software Engineer';
+    return 'Software Engineer or Product Manager';
+  };
+  const effectiveJobRole = mapRole(interviewType, incomingJobRole);
   const nowIso = new Date().toISOString();
   return [
     'Role: You are a data formatter that outputs a single PostgreSQL SQL statement to insert or update interview feedback.',
@@ -102,7 +111,7 @@ function buildSqlPrompt(input: {
     'Input you will receive (examples shown as placeholders):',
     `SESSION_ID: ${sessionId}`,
     `FULL_TRANSCRIPT: ${transcript}`,
-    `CONTEXT: jobRole=${jobRole}; company=${company}; interviewType=${interviewType}`,
+    `CONTEXT: jobRole=${effectiveJobRole}; company=${company}; interviewType=${interviewType}`,
     '',
     'Required numeric metrics you infer from the transcript (integers 0–10):',
     'OVERALL_PERFORMANCE_10: integer 0–10',
@@ -270,7 +279,7 @@ export async function POST(request: NextRequest) {
     for (const loc of LOCATION_CANDIDATES) {
       for (const model of MODEL_CANDIDATES) {
         try {
-          const client = loc === DEFAULT_LOCATION ? vertex_ai : new VertexAI({ project: PROJECT_ID, location: loc });
+          const client = new VertexAI({ project: PROJECT_ID, location: loc });
           const generativeModel = client.preview.getGenerativeModel({ model, generationConfig });
           const result = await generativeModel.generateContent(prompt);
           const response: any = result.response;
@@ -304,7 +313,7 @@ export async function POST(request: NextRequest) {
     if (!sql) {
       // Second-chance: minimal prompt with gemini-2.5-flash in default region
       try {
-        const client = vertex_ai
+        const client = new VertexAI({ project: PROJECT_ID, location: DEFAULT_LOCATION })
         const generativeModel = client.preview.getGenerativeModel({
           model: 'gemini-2.5-flash',
           generationConfig: { ...generationConfig, maxOutputTokens: 600, temperature: 0.0, topP: 0.9 },

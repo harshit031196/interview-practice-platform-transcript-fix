@@ -33,8 +33,10 @@ export default function RoleSelectionPage() {
 
       // Redirect based on role selection
       if (role === 'INTERVIEWEE') {
-        router.push('/onboarding/interviewee')
+        // Mentee: skip interviewee form and go to dashboard
+        router.push('/dashboard')
       } else {
+        // Mentor: go to mentor onboarding form
         router.push('/onboarding/mentor')
       }
     } catch (error) {

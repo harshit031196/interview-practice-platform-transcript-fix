@@ -97,15 +97,7 @@ function SignInPageContent() {
     }
   }
 
-  const handleOAuthSignIn = async (provider: 'google' | 'microsoft') => {
-    setIsLoading(true)
-    try {
-      await signIn(provider, { callbackUrl })
-    } catch (err) {
-      setError('Failed to sign in with ' + provider)
-      setIsLoading(false)
-    }
-  }
+  // OAuth removed on site: only email/password sign-in is supported here
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
@@ -164,31 +156,7 @@ function SignInPageContent() {
               </Button>
             </form>
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-background px-2 text-muted-foreground">Or continue with</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="outline"
-                onClick={() => handleOAuthSignIn('google')}
-                disabled={isLoading}
-              >
-                Google
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => handleOAuthSignIn('microsoft')}
-                disabled={isLoading}
-              >
-                Microsoft
-              </Button>
-            </div>
+            {/* OAuth options removed: only credentials sign-in */}
           </CardContent>
         </Card>
       </div>

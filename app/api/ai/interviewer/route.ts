@@ -8,14 +8,13 @@ import { VertexAI, HarmCategory, HarmBlockThreshold } from '@google-cloud/vertex
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// Initialize Vertex AI
-const vertex_ai = new VertexAI({
-  project: 'wingman-interview-470419',
-  location: 'us-central1',
-});
+// Vertex AI client will be created lazily inside the request handler to avoid build-time env issues
 
-// Use the specified model
-const model = 'gemini-2.5-flash';
+// Use the originally working model and API surface in us-central1
+// Primary model restored per request
+const PRIMARY_MODEL = 'gemini-2.5-flash';
+// Keep a conservative fallback in case of regional/access issues
+const FALLBACK_MODEL = 'gemini-1.5-pro-001';
 
 // Build a deterministic, contextual fallback to avoid random questions mid-interview
 function buildContextualFallback(
@@ -28,27 +27,29 @@ function buildContextualFallback(
   const lastAssistantLower = lastAssistantMsg.toLowerCase();
 
   if (interviewType === 'product') {
-    // Heuristics tailored to product conversations
+    // Heuristics tailored to PM conversations
     if (
-      lastAssistantLower.includes('real-time') ||
-      lastAssistantLower.includes('real time') ||
-      lastUserMsg.includes('real-time') ||
-      lastUserMsg.includes('real time') ||
-      lastUserMsg.includes('job') ||
-      lastUserMsg.includes('linkedin') ||
-      lastUserMsg.includes('recruiter') ||
-      lastUserMsg.includes('career')
+      lastUserMsg.includes('metric') ||
+      lastUserMsg.includes('kpi') ||
+      lastUserMsg.includes('north star')
     ) {
-      return 'What signals and data sources would you use to detect and update job status in near real-time?';
+      return 'Which success metrics would you define for this and why?';
     }
     if (
+      lastUserMsg.includes('favorite product') ||
+      lastAssistantLower.includes('favorite product')
+    ) {
+      return 'What is one concrete improvement you would propose and how would you validate it?';
+    }
+    if (
+      lastUserMsg.includes('root cause') ||
+      lastAssistantLower.includes('root cause') ||
       lastUserMsg.includes('problem') ||
-      lastUserMsg.includes('pain') ||
-      lastAssistantLower.includes('problem')
+      lastUserMsg.includes('pain')
     ) {
-      return 'How would you prioritize addressing this problem against other roadmap items?';
+      return 'What hypotheses would you test to identify the root cause, and how would you prioritize next steps?';
     }
-    // Default product follow-up keeps momentum and avoids randomness
+    // Default PM follow-up keeps momentum and avoids randomness
     return 'What metrics would you track to measure the success of your approach?';
   }
 
@@ -66,6 +67,65 @@ function buildContextualFallback(
 
   // Generic deterministic fallback
   return 'Could you summarize your approach in one or two sentences?';
+}
+
+// Map interview type to appropriate job role and guideline emphasis
+function deriveRoleAndGuidelines(
+  interviewType: string,
+  incomingRole?: string
+): { role: string; guidelines: string } {
+  const t = (interviewType || '').toLowerCase().replace(/\s+/g, '-');
+
+  if (t === 'product') {
+    return {
+      role: 'Product Manager',
+      guidelines: [
+        '- Focus on product strategy, defining problems, and user-centric thinking',
+        '- Ask about success metrics (North Star, KPIs), experimentation, and measurement',
+        '- Explore prioritization frameworks (e.g., RICE/ICE), trade-offs, and roadmap reasoning',
+        '- Include favorite product critique, root-cause analysis, and hypothesis-driven approaches',
+        '- Avoid coding or low-level system design topics; keep it PM-focused'
+      ].join('\n')
+    };
+  }
+
+  if (t === 'technical') {
+    return {
+      role: 'Software Engineer',
+      guidelines: [
+        '- Focus on algorithms, data structures, complexity, and debugging approaches',
+        '- Probe for edge cases, testing strategy, and code quality practices',
+        '- Keep questions practical and implementation-oriented (no product strategy topics)'
+      ].join('\n')
+    };
+  }
+
+  if (t === 'system-design') {
+    return {
+      role: 'Software Engineer',
+      guidelines: [
+        '- Focus on architecture, scalability, reliability, and trade-offs',
+        '- Ask about components, APIs, data modeling, consistency, and bottlenecks',
+        '- Keep it SWE-focused (avoid PM-only topics like go-to-market or product strategy)'
+      ].join('\n')
+    };
+  }
+
+  // Behavioral supports both roles; optionally honor an explicit incoming role
+  const normalizedIncoming = (incomingRole || '').toLowerCase();
+  const explicitRole = /product\s*manager|pm/.test(normalizedIncoming)
+    ? 'Product Manager'
+    : /software\s*(engineer|developer)|swe|sde/.test(normalizedIncoming)
+      ? 'Software Engineer'
+      : 'Software Engineer or Product Manager';
+  return {
+    role: explicitRole,
+    guidelines: [
+      '- Focus on past experiences using the STAR method (Situation, Task, Action, Result)',
+      '- Cover leadership, teamwork, conflict resolution, ownership, and communication',
+      '- If the candidate\'s target role (PM vs SWE) is unclear, start with one brief clarifying question and then tailor follow-ups accordingly'
+    ].join('\n')
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -125,15 +185,17 @@ export async function POST(request: NextRequest) {
     const { 
       userResponse, 
       conversationHistory = [], 
-      jobRole = 'Software Engineer',
+      jobRole: incomingJobRole = 'Software Engineer',
       company = 'FAANG',
       interviewType = 'behavioral'
     } = body;
 
-    console.log('Interviewer API called with:', { userResponse, conversationHistory, jobRole, company, interviewType });
+    const { role: effectiveJobRole, guidelines: typeGuidelines } = deriveRoleAndGuidelines(interviewType, incomingJobRole);
+
+    console.log('Interviewer API called with:', { userResponse, conversationHistory, incomingJobRole, effectiveJobRole, company, interviewType });
 
     // System prompt for the AI interviewer
-    const systemPrompt = `You are an experienced ${company} interviewer conducting a ${interviewType} interview for a ${jobRole} position. 
+    const systemPrompt = `You are an experienced ${company} interviewer conducting a ${interviewType} interview for a ${effectiveJobRole} position. 
 
 Your role:
 - Ask CONCISE, direct questions (1-2 sentences maximum)
@@ -144,7 +206,7 @@ Your role:
 - Build upon previous responses naturally
 
 Interview Type Guidelines:
-${interviewType === 'behavioral' ? '- Focus on past experiences, leadership, teamwork, conflict resolution\n- Use brief "Tell me about..." questions\n- Keep questions under 15 words when possible' : ''}`;
+${typeGuidelines}`;
 
     // Prepare the conversation context
     const messages = [
@@ -170,9 +232,50 @@ ${interviewType === 'behavioral' ? '- Focus on past experiences, leadership, tea
       }
     }
 
-    // Generate AI response using Gemini
-    const generativeModel = vertex_ai.preview.getGenerativeModel({
-      model: model,
+    // Lazily resolve Vertex AI project and location. Fallback to metadata server if envs are not set.
+    const ENV_PROJECT = process.env.GOOGLE_CLOUD_PROJECT 
+      || process.env.GOOGLE_CLOUD_PROJECT_ID 
+      || (process.env as any).GCLOUD_PROJECT 
+      || (process.env as any).GCP_PROJECT 
+      || (process.env as any).PROJECT_ID;
+
+    const V_LOCATION = process.env.GOOGLE_CLOUD_LOCATION 
+      || (process.env as any).GOOGLE_CLOUD_REGION 
+      || (process.env as any).CLOUD_REGION 
+      || 'us-central1';
+
+    const resolveProject = async (): Promise<string | null> => {
+      if (ENV_PROJECT && typeof ENV_PROJECT === 'string') return ENV_PROJECT;
+      try {
+        const resp = await fetch('http://metadata.google.internal/computeMetadata/v1/project/project-id', {
+          headers: { 'Metadata-Flavor': 'Google' },
+        });
+        if (resp.ok) {
+          const txt = await resp.text();
+          return (txt || '').trim() || null;
+        }
+      } catch {}
+      return null;
+    };
+
+    const PROJECT_ID = await resolveProject();
+    console.log('[VertexAI] init', { project: PROJECT_ID, location: V_LOCATION });
+
+    let vertex_ai: VertexAI;
+    try {
+      if (!PROJECT_ID) {
+        throw new Error('Missing project id for VertexAI');
+      }
+      vertex_ai = new VertexAI({ project: PROJECT_ID, location: V_LOCATION });
+    } catch (e) {
+      console.error('[VertexAI] initialization failed:', e);
+      const contextual = buildContextualFallback(interviewType, userResponse, conversationHistory);
+      return NextResponse.json({ question: contextual });
+    }
+
+    // Generate AI response using Gemini (preview surface for 2.5 models)
+    let generativeModel = vertex_ai.preview.getGenerativeModel({
+      model: PRIMARY_MODEL,
       generationConfig: {
         maxOutputTokens: 800, // Increased to ensure complete responses
         temperature: 0.5, // Lower temperature for more consistent responses
@@ -250,8 +353,48 @@ ${interviewType === 'behavioral' ? '- Focus on past experiences, leadership, tea
     
     let aiResponse;
     try {
-      console.log('[API] Calling Gemini API with model:', model);
-      const result = await generativeModel.generateContent(prompt);
+      console.log('[API] Calling Gemini API (preview) with model:', PRIMARY_MODEL);
+      let result;
+      try {
+        result = await generativeModel.generateContent(prompt);
+      } catch (err: any) {
+        const msg = (err && (err.message || err.toString())) || ''
+        const is404 = (err?.code === 404) || /NOT_FOUND|was not found|404/i.test(msg)
+        if (is404) {
+          console.warn('[API] Primary model not found or not accessible, falling back to:', FALLBACK_MODEL)
+          generativeModel = vertex_ai.preview.getGenerativeModel({
+            model: FALLBACK_MODEL,
+            generationConfig: {
+              maxOutputTokens: 800,
+              temperature: 0.5,
+              topP: 0.8,
+              topK: 30,
+              stopSequences: [],
+            },
+            safetySettings: [
+              {
+                category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE
+              },
+              {
+                category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE
+              },
+              {
+                category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE
+              },
+              {
+                category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE
+              }
+            ],
+          })
+          result = await generativeModel.generateContent(prompt)
+        } else {
+          throw err
+        }
+      }
       const response = result.response;
       
       // Log the response structure for debugging

@@ -237,6 +237,16 @@ function UnifiedInterviewSession({
   const chunksRef = useRef<Blob[]>([]);
   const visionAnalysisIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastPollTimestampRef = useRef<number>(Date.now());
+  // Chat auto-scroll container
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll chat to bottom when new messages or interim transcript appear
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [messages, interimTranscript]);
 
   // Vision API states
   const [visionAnalysisData, setVisionAnalysisData] = useState<any[]>([]);
@@ -524,7 +534,9 @@ function UnifiedInterviewSession({
     try {
       console.log('▶️ [Video] Starting continuous recording...');
       const mediaRecorder = new MediaRecorder(streamRef.current, {
-        mimeType: 'video/webm;codecs=vp9,opus'
+        mimeType: 'video/webm;codecs=vp9,opus',
+        videoBitsPerSecond: 1_200_000, // ~1.2 Mbps to control file size
+        audioBitsPerSecond: 64_000,
       });
       
       mediaRecorderRef.current = mediaRecorder;
@@ -617,6 +629,15 @@ function UnifiedInterviewSession({
                 } catch (e) {
                   console.warn('Failed to start frame analysis:', e);
                 }
+                // Ensure continuous recording begins at interview start so upload is guaranteed on end
+                try {
+                  if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+                    console.log('▶️ [Video] Starting continuous recording at interview start...');
+                    startContinuousRecording();
+                  }
+                } catch (recErr) {
+                  console.warn('Failed to start continuous recording at interview start:', recErr);
+                }
               }).catch(() => {
                 console.log('Second play attempt failed, video may need user interaction');
               });
@@ -629,12 +650,19 @@ function UnifiedInterviewSession({
 
       if (isConversational) {
         // Get initial AI question
+        const mapRole = (type: string) => {
+          const t = (type || '').toLowerCase();
+          if (t === 'product') return 'Product Manager';
+          if (t === 'technical' || t === 'system-design' || t === 'system design') return 'Software Engineer';
+          return 'Software Engineer or Product Manager';
+        };
+        const effectiveJobRole = mapRole(interviewType);
         const response = await fetch('/api/ai/interviewer', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             sessionId,
-            jobRole: 'Software Engineer',
+            jobRole: effectiveJobRole,
             company: 'FAANG',
             interviewType,
             conversationHistory: []
@@ -1207,41 +1235,94 @@ function UnifiedInterviewSession({
   // Upload the full continuous video
   const uploadFullVideo = useCallback(async (videoBlob: Blob) => {
     console.log(`[Full Video Upload] Uploading full video, size: ${videoBlob.size} bytes...`);
-    const formData = new FormData();
-    formData.append('file', videoBlob, `interview_${sessionId}_full_${Date.now()}.webm`);
-    formData.append('sessionId', sessionId);
+    const fileName = `interview_${sessionId}_full_${Date.now()}.webm`;
+    const contentType = videoBlob.type || 'video/webm';
+    const SIZE_THRESHOLD = 20 * 1024 * 1024; // 20MB safety threshold
 
     try {
-      const uploadResponse = await fetch('/api/upload/direct', {
-        method: 'POST',
-        body: formData,
-        credentials: 'include',
-        headers: { 'X-Auth-Method': 'hybrid-session' }
-      });
+      if (videoBlob.size > SIZE_THRESHOLD) {
+        // Use V4 signed PUT URL for large files to avoid Cloud Run size limits
+        const createRes = await fetch('/api/upload/signed-put', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ sessionId, filename: fileName, contentType })
+        });
+        if (!createRes.ok) {
+          const errText = await createRes.text();
+          console.error('[Full Video Upload] Failed to init signed upload:', errText);
+          return null;
+        }
+        const { signedUrl, filename, gcsUri } = await createRes.json();
 
-      if (uploadResponse.ok) {
-        const { videoUri } = await uploadResponse.json();
-        console.log(`[Full Video Upload] Full video uploaded successfully: ${videoUri}`);
-        setVideoSegmentUris([videoUri]); // Replace any previous segments with just this one full video
-        
-        // Trigger analysis for the full video (fire-and-forget)
-        console.log(`[Full Video Analysis] Triggering analysis for full video (async): ${videoUri}`);
+        const putRes = await fetch(signedUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': contentType },
+          body: videoBlob,
+        });
+        if (!putRes.ok) {
+          const errText = await putRes.text();
+          console.error('[Full Video Upload] GCS upload failed:', putRes.status, errText);
+          return null;
+        }
+
+        // Confirm and persist DB record (non-fatal if fails)
+        await fetch('/api/upload/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ sessionId, filename, gcsUri })
+        }).catch(e => console.warn('[Full Video Upload] Confirm upload failed (non-fatal):', e));
+
+        // Trigger analysis
+        console.log(`[Full Video Analysis] Triggering analysis for full video (async): ${gcsUri}`);
         triggerVideoAnalysisWithRetry(
-          videoUri,
+          gcsUri,
           sessionId,
           3,
           (message: string) => console.log(`[Full Video Analysis] Progress: ${message}`),
-          0 // Use segment index 0 for the full video
-        )
-          .then(() => console.log('[Full Video Analysis] Async analysis completed'))
-          .catch((err: any) => console.error('[Full Video Analysis] Async analysis error', err));
+          0
+        ).then(() => console.log('[Full Video Analysis] Async analysis completed'))
+         .catch((err: any) => console.error('[Full Video Analysis] Async analysis error', err));
 
-        return videoUri;
+        setVideoSegmentUris([gcsUri]);
+        return gcsUri;
       } else {
-        console.error(`[Full Video Upload] Upload failed:`, uploadResponse.status);
-        const errorText = await uploadResponse.text();
-        console.error('[Full Video Upload] Upload error details:', errorText);
-        return null;
+        // Use existing direct API for smaller files
+        const formData = new FormData();
+        formData.append('file', videoBlob, fileName);
+        formData.append('sessionId', sessionId);
+
+        const uploadResponse = await fetch('/api/upload/direct', {
+          method: 'POST',
+          body: formData,
+          credentials: 'include',
+          headers: { 'X-Auth-Method': 'hybrid-session' }
+        });
+
+        if (uploadResponse.ok) {
+          const { videoUri } = await uploadResponse.json();
+          console.log(`[Full Video Upload] Full video uploaded successfully: ${videoUri}`);
+          setVideoSegmentUris([videoUri]);
+
+          console.log(`[Full Video Analysis] Triggering analysis for full video (async): ${videoUri}`);
+          triggerVideoAnalysisWithRetry(
+            videoUri,
+            sessionId,
+            3,
+            (message: string) => console.log(`[Full Video Analysis] Progress: ${message}`),
+            0
+          )
+            .then(() => console.log('[Full Video Analysis] Async analysis completed'))
+            .catch((err: any) => console.error('[Full Video Analysis] Async analysis error', err));
+
+          return videoUri;
+        } else {
+          console.error(`[Full Video Upload] Upload failed:`, uploadResponse.status);
+          const errorText = await uploadResponse.text();
+          console.error('[Full Video Upload] Upload error details:', errorText);
+          return null;
+        }
       }
     } catch (error) {
       console.error(`[Full Video Upload] Error uploading full video:`, error);
@@ -1389,7 +1470,7 @@ function UnifiedInterviewSession({
     }
   }, [sessionId, messages, isConversational, onComplete, pollForAnalysisResults, stopFrameAnalysis, visionAnalysisData, ensureValidSession, videoSegmentUris, isContinuousRecording, stopContinuousRecording, uploadFullVideo]);
   return (
-    <div className="flex flex-col gap-4 w-full max-w-5xl mx-auto">
+    <div className="flex flex-col gap-4 w-full max-w-[1400px] mx-auto px-4">
       <audio ref={audioPlayerRef} />
       {/* Interview Header */}
       <div className="flex justify-between items-center">
@@ -1406,26 +1487,26 @@ function UnifiedInterviewSession({
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Video Feed */}
+      {/* Main Content - Redesigned: Large user video + right-side chat */}
+      <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6 items-start">
+        {/* Large Video Area with PiP interviewer */}
         <Card className="overflow-hidden">
           <CardHeader className="pb-2">
             <CardTitle className="flex justify-between items-center">
               <span>Video Feed</span>
               {interviewStarted && (
-                <Badge variant={isRecording ? "destructive" : "outline"} className="ml-2">
+                <Badge variant={isRecording ? 'destructive' : 'outline'} className="ml-2">
                   {isRecording ? 'Recording' : 'Ready'}
                 </Badge>
               )}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="relative aspect-video bg-black rounded-md overflow-hidden">
+            <div className="relative bg-black rounded-md overflow-hidden aspect-video min-h-[420px] max-h-[78vh]">
               {!interviewStarted ? (
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <Button 
-                    onClick={startInterview} 
+                  <Button
+                    onClick={startInterview}
                     disabled={isProcessing}
                     className="flex items-center gap-2"
                   >
@@ -1435,24 +1516,27 @@ function UnifiedInterviewSession({
                 </div>
               ) : (
                 <>
-                  <video 
-                    ref={videoRef} 
-                    className="w-full h-full object-cover z-10" 
+                  <video
+                    ref={videoRef}
+                    className="absolute inset-0 w-full h-full object-cover z-10"
                     autoPlay
                     playsInline
                     muted
                     style={{ display: 'block' }}
                   />
+                  {/* Soft AI speaking overlay */}
                   <video
                     ref={aiVideoRef}
-                    src="/videos/ai-interviewer.mp4" // Using a stock video
+                    src="/videos/ai-interviewer.mp4"
                     loop
                     playsInline
                     className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${isAiSpeaking ? 'opacity-70' : 'opacity-0'} z-0`}
                     style={{ pointerEvents: 'none' }}
                   />
                   <audio ref={audioRef} />
-                  <div className="absolute bottom-2 right-2 flex gap-2">
+
+                  {/* Controls bottom-left to avoid overlapping PiP */}
+                  <div className="absolute bottom-4 left-4 flex gap-2 z-20">
                     {isConversational ? (
                       isRecording ? (
                         <Button size="sm" variant="destructive" onClick={stopAnswering} disabled={isProcessing}>
@@ -1460,37 +1544,50 @@ function UnifiedInterviewSession({
                           Stop Answering
                         </Button>
                       ) : (
-                        <>
-                          {/* Debug log for button conditions */}
-                          {console.log('Start Answering button conditions:', { 
-                            isProcessing, 
-                            isAiSpeaking, 
-                            interviewStarted, 
-                            isContinuousRecording,
-                            shouldBeDisabled: isProcessing || isAiSpeaking || !interviewStarted || !isContinuousRecording
-                          })}
-                          <Button 
-                            size="sm" 
-                            variant="default" 
-                            onClick={startAnswering} 
-                            disabled={isProcessing || isAiSpeaking || !interviewStarted}
-                          >
-                            <Mic className="h-4 w-4 mr-1" />
-                            Start Answering
-                          </Button>
-                        </>
+                        <Button
+                          size="sm"
+                          variant="default"
+                          onClick={startAnswering}
+                          disabled={isProcessing || isAiSpeaking || !interviewStarted}
+                        >
+                          <Mic className="h-4 w-4 mr-1" />
+                          Start Answering
+                        </Button>
                       )
                     ) : null}
+                  </div>
+
+                  {/* PiP Interviewer bottom-right (smaller) */}
+                  <div className="absolute bottom-4 right-4 w-36 sm:w-44 md:w-48 bg-black/80 rounded-lg overflow-hidden shadow-lg border border-white/10 z-20">
+                    <div className="relative w-full aspect-video flex items-center justify-center bg-neutral-900">
+                      {/* Inline SVG admin stock avatar */}
+                      <svg viewBox="0 0 64 64" className="w-16 h-16 text-neutral-400">
+                        <circle cx="32" cy="24" r="12" fill="currentColor" />
+                        <path d="M8 56c4-12 16-16 24-16s20 4 24 16" fill="currentColor" />
+                      </svg>
+                      {/* Name label */}
+                      <div className="absolute left-2 bottom-2 px-2 py-0.5 text-[10px] font-medium bg-white/10 text-white rounded">Interviewer</div>
+                    </div>
+                    <div className="p-2 bg-black/60">
+                      <div className="text-xs text-white/80 mb-1">Audio Meter</div>
+                      <div className="h-4 flex items-end gap-1" aria-hidden="true">
+                        <span className={`w-1.5 bg-indigo-400 rounded-sm ${isAiSpeaking ? 'animate-eq1' : ''}`} />
+                        <span className={`w-1.5 bg-indigo-400 rounded-sm ${isAiSpeaking ? 'animate-eq2' : ''}`} />
+                        <span className={`w-1.5 bg-indigo-400 rounded-sm ${isAiSpeaking ? 'animate-eq3' : ''}`} />
+                        <span className={`w-1.5 bg-indigo-400 rounded-sm ${isAiSpeaking ? 'animate-eq2' : ''}`} />
+                        <span className={`w-1.5 bg-indigo-400 rounded-sm ${isAiSpeaking ? 'animate-eq1' : ''}`} />
+                      </div>
+                    </div>
                   </div>
                 </>
               )}
             </div>
-            
-            {/* Controls */}
+
+            {/* Controls below video area */}
             {interviewStarted && !isAnalyzing && (
               <div className="mt-4 flex justify-between">
-                <Button 
-                  variant="outline" 
+                <Button
+                  variant="outline"
                   onClick={() => {
                     if (videoRef.current) {
                       videoRef.current.srcObject = null;
@@ -1505,8 +1602,8 @@ function UnifiedInterviewSession({
                 >
                   Restart
                 </Button>
-                <Button 
-                  variant="default" 
+                <Button
+                  variant="default"
                   onClick={handleEndInterview}
                   disabled={isProcessing || isRecording}
                 >
@@ -1517,7 +1614,7 @@ function UnifiedInterviewSession({
           </CardContent>
         </Card>
 
-        {/* Conversation / Instructions */}
+        {/* Right-side Conversation / Instructions with auto-scroll */}
         <Card>
           <CardHeader className="pb-2">
             <CardTitle>
@@ -1526,14 +1623,12 @@ function UnifiedInterviewSession({
           </CardHeader>
           <CardContent>
             {isConversational ? (
-              <div className="flex flex-col gap-4 h-[350px] overflow-y-auto">
+              <div ref={chatScrollRef} className="flex flex-col gap-4 h-[70vh] overflow-y-auto pr-2">
                 {messages.map((message, index) => (
-                  <div 
-                    key={index} 
+                  <div
+                    key={index}
                     className={`p-3 rounded-lg ${
-                      message.role === 'assistant' 
-                        ? 'bg-primary/10 text-black' 
-                        : 'bg-muted text-black'
+                      message.role === 'assistant' ? 'bg-primary/10 text-black' : 'bg-muted text-black'
                     }`}
                   >
                     <div className="flex items-center gap-2 mb-1">
@@ -1549,8 +1644,8 @@ function UnifiedInterviewSession({
                     <div className="text-sm">{message.content}</div>
                   </div>
                 ))}
-                
-                {/* Display interim transcript while user is speaking */}
+
+                {/* Interim transcript while user is speaking */}
                 {isRecording && interimTranscript && (
                   <div className="p-3 rounded-lg bg-muted/50 text-black border border-dashed border-gray-300">
                     <div className="flex items-center gap-2 mb-1">
@@ -1575,33 +1670,6 @@ function UnifiedInterviewSession({
                 </p>
               </div>
             )}
-          </CardContent>
-        </Card>
-
-        {/* Interviewer Audio Meter */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle>Interviewer Audio</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="p-3 rounded-md border bg-muted/50">
-              <div className="flex items-center justify-between mb-3">
-                <div className="text-sm font-medium">Audio Meter</div>
-                <Badge variant={isAiSpeaking ? 'default' : 'outline'} className="capitalize">
-                  {isAiSpeaking ? 'Speaking' : 'Idle'}
-                </Badge>
-              </div>
-              <div className="h-20 flex items-end gap-1" aria-hidden="true">
-                <span className={`w-2 bg-indigo-500 rounded-sm ${isAiSpeaking ? 'animate-eq1' : ''}`} />
-                <span className={`w-2 bg-indigo-500 rounded-sm ${isAiSpeaking ? 'animate-eq2' : ''}`} />
-                <span className={`w-2 bg-indigo-500 rounded-sm ${isAiSpeaking ? 'animate-eq3' : ''}`} />
-                <span className={`w-2 bg-indigo-500 rounded-sm ${isAiSpeaking ? 'animate-eq2' : ''}`} />
-                <span className={`w-2 bg-indigo-500 rounded-sm ${isAiSpeaking ? 'animate-eq1' : ''}`} />
-              </div>
-              <div className="text-xs text-muted-foreground mt-2">
-                {isAiSpeaking ? 'Playing interviewer audio…' : 'Waiting for interviewer audio'}
-              </div>
-            </div>
           </CardContent>
         </Card>
       </div>

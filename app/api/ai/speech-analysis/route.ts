@@ -14,15 +14,11 @@ type WordTiming = {
   endTime: number;
 };
 
-// Initialize Speech-to-Text client
-const speechClient = new SpeechClient({
-  projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'wingman-interview-470419'
-});
+// Initialize Speech-to-Text client via Application Default Credentials
+const speechClient = new SpeechClient();
 
-// Initialize Google Cloud Storage client
-const storage = new Storage({
-  projectId: process.env.GOOGLE_CLOUD_PROJECT_ID || 'wingman-interview-470419'
-});
+// Initialize Google Cloud Storage client via Application Default Credentials
+const storage = new Storage();
 
 // Get Google Cloud Storage bucket name from env or use default
 const bucketName = process.env.GCS_BUCKET_NAME || 'interview-audio-analysis';
@@ -52,8 +48,9 @@ async function getAuthenticatedUserId(request: NextRequest): Promise<string | un
   
   // If no JWT or session, check for database session directly
   if (!userId) {
-    // Check standard session token first
-    let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+    // Check session token (support secure and non-secure cookie names)
+    let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+      || request.cookies.get('next-auth.session-token')?.value;
     
     // If not found, check for database-specific session token (for hybrid fallback)
     if (!sessionToken) {
@@ -106,9 +103,11 @@ async function uploadToGCS(audioBuffer: Buffer, fileName: string): Promise<strin
   const bucket = storage.bucket(bucketName);
   const file = bucket.file(fileName);
   
-  // Upload audio buffer to GCS
+  // Upload audio buffer to GCS (force simple upload to avoid AbortSignal/resumable issues)
   try {
     await file.save(audioBuffer, {
+      resumable: false,
+      validation: false,
       contentType: 'audio/webm',
       metadata: {
         cacheControl: 'private, max-age=0',

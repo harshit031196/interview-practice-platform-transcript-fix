@@ -22,47 +22,48 @@ import {
   Brain
 } from 'lucide-react'
 import Link from 'next/link'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 
 const readingMaterials = [
   {
+    title: 'Behavioral Interview Questions (2025 Guide)',
+    description: 'Latest behavioral questions and sample answers using the STAR method.',
+    link: 'https://www.indeed.com/career-advice/interviewing/behavioral-interview-questions',
+  },
+  {
     title: 'Master the STAR Method',
-    description: 'Ace behavioral interviews with this proven technique.',
+    description: 'Ace behavioral interviews with a structured response technique.',
     link: 'https://www.indeed.com/career-advice/interviewing/how-to-use-the-star-interview-response-technique',
   },
   {
+    title: 'Salary Negotiation: A Practical Playbook',
+    description: 'Concrete steps and scripts for negotiating your offer.',
+    link: 'https://www.levels.fyi/negotiation',
+  },
+  {
+    title: 'FAANG Interview Questions and Patterns',
+    description: 'Patterns and topics frequently tested by big tech companies.',
+    link: 'https://www.interviewkickstart.com/interview-questions/faang-interview-questions',
+  },
+  {
     title: 'System Design Fundamentals',
-    description: 'Prepare for technical interviews with these core concepts.',
-    link: 'https://www.geeksforgeeks.org/system-design/top-10-system-design-interview-questions-and-answers/',
+    description: 'Core concepts and commonly asked system design topics.',
+    link: 'https://www.educative.io/blog/complete-guide-to-system-design',
   },
   {
-    title: 'Product Management Interview Prep',
-    description: 'A complete guide to acing your PM interview.',
-    link: 'https://www.productplan.com/learn/product-management-interview/',
-  },
-  {
-    title: 'Data Structures & Algorithms Guide',
-    description: 'Refresh your knowledge on essential DSA topics.',
+    title: 'Data Structures & Algorithms Refresher',
+    description: 'A curated refresher of DSA essentials for coding interviews.',
     link: 'https://www.freecodecamp.org/news/the-top-data-structures-you-should-know-for-your-next-coding-interview-36af0831f5e3/',
   },
   {
-    title: 'Crafting a Compelling Tech Resume',
-    description: 'Tips for making your resume stand out to recruiters.',
-    link: 'https://www.levels.fyi/blog/tech-resume-essentials.html',
+    title: 'PM Interview: Latest Trends',
+    description: 'Updated guidance on structured PM interviews.',
+    link: 'https://www.productplan.com/learn/product-management-interview/',
   },
   {
-    title: 'Networking for Software Engineers',
-    description: 'Strategies for building your professional network.',
-    link: 'https://www.developer.com/project-management/networking-for-software-engineers/',
-  },
-  {
-    title: 'Common Behavioral Questions',
-    description: 'Practice your answers to the most common questions.',
-    link: 'https://www.themuse.com/advice/behavioral-interview-questions-answers-examples',
-  },
-  {
-    title: 'Salary Negotiation Strategies',
-    description: 'Learn how to negotiate your salary effectively.',
+    title: 'Negotiation Tactics from HBS',
+    description: 'Evidence-based tactics to negotiate effectively.',
     link: 'https://online.hbs.edu/blog/post/salary-negotiation-tips',
   },
 ];
@@ -105,6 +106,7 @@ export default function DashboardPage() {
   const { data: session, status } = useSession()
   const [isRoleSwitching, setIsRoleSwitching] = useState(false)
   const userRole = session?.user?.role
+  const router = useRouter()
 
   const { data: analytics } = useQuery<AnalyticsData>({
     queryKey: ['analytics', 'overview'],
@@ -144,29 +146,61 @@ export default function DashboardPage() {
     retry: false
   })
 
-  // Show loading animation while checking authentication
-  if (status === 'loading') {
-    return <LoadingAnimation message="Loading your dashboard..." fullscreen />
-  }
-
-    const aggregateReadinessScore = analytics?.readinessTrend && analytics.readinessTrend.length > 0
-    ? Math.round(analytics.readinessTrend.reduce((acc, cur) => acc + cur.score, 0) / analytics.readinessTrend.length)
-    : analytics?.readinessScore || 0;
-
-  const latestScore = analytics?.readinessScore || 0;
-
-  const sessionsThisMonth = analytics?.readinessTrend?.filter(session => {
-    const sessionDate = new Date(session.date);
-    const now = new Date();
-    return sessionDate.getMonth() === now.getMonth() && sessionDate.getFullYear() === now.getFullYear();
-  }).length || 0;
-
   const handleLogout = async () => {
     await signOut({ 
       callbackUrl: '/',
       redirect: true 
     })
   }
+
+  // If mentor has not submitted an application yet, redirect to mentor onboarding form
+  useEffect(() => {
+    if (status === 'authenticated' && userRole === 'INTERVIEWER' && mentorApplication === null) {
+      router.replace('/onboarding/mentor')
+    }
+  }, [status, userRole, mentorApplication, router])
+
+  // Show loading animation while checking authentication
+  if (status === 'loading') {
+    return <LoadingAnimation message="Loading your dashboard..." fullscreen />
+  }
+
+  // If user is a mentor and application exists but is not verified, show minimal pending screen only
+  if (status === 'authenticated' && mentorApplication && mentorApplication.status !== 'VERIFIED') {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
+        <div className="max-w-xl w-full">
+          <div className="text-center mb-4 text-gray-900 text-xl font-semibold">
+            {`Welcome back, ${session?.user?.name || 'Mentor'}!`}
+          </div>
+          <Card className="w-full border-yellow-200 bg-yellow-50">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-yellow-800">
+                <Clock className="w-5 h-5" /> Your application is under process
+              </CardTitle>
+              <CardDescription className="text-yellow-700">
+                Your dashboard will be active once you've been accepted by admins.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex justify-end">
+              <Button variant="outline" onClick={handleLogout}>Logout</Button>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
+  const lastThreeCount = (analytics as any)?.lastThreeCount ?? 0;
+  const readinessLastThree = (analytics as any)?.readinessLastThree ?? null;
+  const latestScore = typeof readinessLastThree === 'number' ? readinessLastThree : (analytics?.readinessScore || 0);
+  const completedWithScores = (analytics as any)?.completedSessions ?? 0;
+  const displayReadinessScore = typeof readinessLastThree === 'number'
+    ? readinessLastThree
+    : (analytics?.averageScore ?? analytics?.readinessScore ?? 0);
+  const sessionsThisMonth = (analytics as any)?.sessionsThisMonth ?? 0;
+  const peerPercentile = (analytics as any)?.peerPercentileLastThree ?? analytics?.peerPercentile ?? 0;
+
 
   const handleRoleSwitch = async (newRole: 'INTERVIEWEE' | 'INTERVIEWER' | 'BOTH') => {
     setIsRoleSwitching(true)
@@ -205,6 +239,22 @@ export default function DashboardPage() {
       default:
         return null
     }
+  }
+
+  // Helpers for interviewee dashboard
+  const getReadinessEmojiAndColor = (score: number) => {
+    if (score >= 75) {
+      return { emoji: '😀', color: 'text-green-600' }
+    } else if (score >= 50) {
+      return { emoji: '🤐', color: 'text-yellow-600' }
+    }
+    return { emoji: '😞', color: 'text-red-600' }
+  }
+
+  const getPercentileColor = (p: number) => {
+    if (p >= 75) return 'text-green-600'
+    if (p >= 50) return 'text-yellow-600'
+    return 'text-red-600'
   }
 
   return (
@@ -313,24 +363,34 @@ export default function DashboardPage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="text-lg">Interview Readiness</CardTitle>
-                  <CardDescription>Aggregate score from all sessions</CardDescription>
+                  <CardDescription>
+                    {typeof readinessLastThree === 'number' && lastThreeCount >= 3
+                      ? 'Average of your last three completed sessions'
+                      : 'Average across your completed sessions'}
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {analytics && (
+                  {analytics && (completedWithScores > 0) ? (
                     <div className="text-center">
-                      <div className="text-3xl font-bold text-primary mb-2">
-                        {aggregateReadinessScore}%
-                      </div>
+                      {(() => {
+                        const { emoji, color } = getReadinessEmojiAndColor(displayReadinessScore as number)
+                        return (
+                          <div className="flex items-center justify-center gap-3 mb-2">
+                            <span className="text-3xl" aria-hidden>{emoji}</span>
+                            <span className={`text-3xl font-bold ${color}`}>{displayReadinessScore}%</span>
+                          </div>
+                        )
+                      })()}
                       <div className="text-sm text-muted-foreground mb-4">
-                        {latestScore > aggregateReadinessScore ? (
-                          <span className="text-green-600">↗ Latest score ({latestScore}%) is above average</span>
-                        ) : latestScore < aggregateReadinessScore ? (
-                          <span className="text-red-600">↘ Latest score ({latestScore}%) is below average</span>
-                        ) : (
-                          <span className="text-gray-600">Latest score matches the average</span>
-                        )}
+                        {typeof readinessLastThree === 'number' && lastThreeCount >= 3
+                          ? 'Average of last 3 sessions'
+                          : 'Average of completed sessions'}
                       </div>
-                      <Progress value={aggregateReadinessScore} className="w-full" />
+                      <Progress value={displayReadinessScore || 0} className="w-full" />
+                    </div>
+                  ) : (
+                    <div className="text-center text-sm text-muted-foreground">
+                      Complete at least one session to see your readiness score
                     </div>
                   )}
                 </CardContent>
@@ -368,17 +428,21 @@ export default function DashboardPage() {
                   <CardTitle className="text-lg">Peer Ranking</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  {analytics && (
+                  {analytics && (completedWithScores > 0) ? (
                     <div className="text-center">
-                      <div className="text-3xl font-bold text-primary mb-2">
-                        {analytics.peerPercentile}%
+                      <div className={`text-3xl font-bold mb-2 ${getPercentileColor(peerPercentile as number)}`}>
+                        {peerPercentile}%
                       </div>
-                      <div className="text-sm text-muted-foreground">
-                        Better than peers
-                      </div>
+                      <div className="text-sm text-muted-foreground">Better than peers</div>
                       <div className="text-xs text-muted-foreground mt-2">
-                        Keep practicing to improve!
+                        {typeof readinessLastThree === 'number' && lastThreeCount >= 3
+                          ? 'Based on your last 3 sessions'
+                          : 'Estimated based on your recent performance'}
                       </div>
+                    </div>
+                  ) : (
+                    <div className="text-center text-sm text-muted-foreground">
+                      Complete at least one session to see your peer percentile
                     </div>
                   )}
                 </CardContent>
@@ -530,7 +594,8 @@ export default function DashboardPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3">
+              {/* Show top ~4 with inner scroll for more */}
+              <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
                 {readingMaterials.map((item, index) => (
                   <Link href={item.link} key={index} target="_blank" rel="noopener noreferrer" className="block p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
                     <h4 className="font-medium text-sm">{item.title}</h4>

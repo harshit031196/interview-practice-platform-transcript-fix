@@ -103,15 +103,7 @@ export function AuthModal({ open, onOpenChange, defaultTab = 'signin' }: AuthMod
     }
   }
 
-  const handleOAuthSignIn = async (provider: 'google' | 'microsoft') => {
-    setIsLoading(true)
-    try {
-      await signIn(provider, { callbackUrl: '/dashboard' })
-    } catch (err) {
-      setError('Failed to sign in with ' + provider)
-      setIsLoading(false)
-    }
-  }
+  // OAuth removed from main site modal; only email/password flows are supported
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -164,24 +156,7 @@ export function AuthModal({ open, onOpenChange, defaultTab = 'signin' }: AuthMod
               </Button>
             </form>
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-background px-2 text-muted-foreground">Or continue with</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2">
-              <Button
-                variant="outline"
-                onClick={() => handleOAuthSignIn('google')}
-                disabled={isLoading}
-              >
-                Google
-              </Button>
-            </div>
+            {/* OAuth options removed: keep only credentials sign-in */}
           </TabsContent>
 
           <TabsContent value="signup" className="space-y-4">
@@ -231,24 +206,7 @@ export function AuthModal({ open, onOpenChange, defaultTab = 'signin' }: AuthMod
               </Button>
             </form>
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-background px-2 text-muted-foreground">Or continue with</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2">
-              <Button
-                variant="outline"
-                onClick={() => handleOAuthSignIn('google')}
-                disabled={isLoading}
-              >
-                Google
-              </Button>
-            </div>
+            {/* OAuth options removed: keep only credentials sign-up */}
           </TabsContent>
         </Tabs>
       </DialogContent>

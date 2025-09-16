@@ -4,16 +4,17 @@ import { getToken } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
 import { Storage } from '@google-cloud/storage';
 import { prisma } from '@/lib/prisma';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 
 // Ensure this route runs on Node.js runtime (GCS SDK is not compatible with Edge)
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Allow longer processing time for large uploads
+export const maxDuration = 300; // seconds
 
-// Initialize Google Cloud Storage
-const storage = new Storage({
-  projectId: 'wingman-interview-470419',
-  // Use Application Default Credentials (no keyFilename needed)
-});
+// Initialize Google Cloud Storage via Application Default Credentials
+const storage = new Storage();
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,8 +31,9 @@ export async function POST(request: NextRequest) {
     
     // If no JWT or session, check for database session directly
     if (!userId) {
-      // Check standard session token first
-      let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+      // Check session token (support secure and non-secure cookie names)
+      let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+        || request.cookies.get('next-auth.session-token')?.value;
       
       // If not found, check for database-specific session token (for hybrid fallback)
       if (!sessionToken) {
@@ -106,22 +108,23 @@ export async function POST(request: NextRequest) {
     const bucket = storage.bucket(bucketName);
     const fileObj = bucket.file(filename);
 
-    // Convert file to buffer
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    console.log('Upload details:', {
+    // Prefer streaming + resumable upload for large files to avoid buffering the entire file in memory
+    console.log('Upload details (pre-stream):', {
       filename,
       fileSize: file.size,
       fileType: file.type,
-      bufferSize: buffer.length,
       bucketName,
       userId,
       sessionId
     });
 
-    // Upload file directly
-    await fileObj.save(buffer, {
+    // Convert the web ReadableStream to a Node.js Readable stream without loading into memory
+    const nodeStream = Readable.fromWeb(file.stream() as any);
+
+    // Create a GCS write stream (resumable) with metadata
+    const gcsWriteStream = fileObj.createWriteStream({
+      resumable: true,
+      contentType: file.type,
       metadata: {
         contentType: file.type,
         metadata: {
@@ -130,7 +133,16 @@ export async function POST(request: NextRequest) {
           uploadedAt: new Date().toISOString(),
         },
       },
+      // validation left default; resumable uploads provide integrity guarantees
     });
+
+    // Attach error handlers for better diagnostics
+    gcsWriteStream.on('error', (err) => {
+      console.error('[GCS] Write stream error:', err);
+    });
+
+    // Stream the request body directly into GCS
+    await pipeline(nodeStream, gcsWriteStream);
 
     // Generate video URI for analysis
     const videoUri = `gs://${bucketName}/${filename}`;

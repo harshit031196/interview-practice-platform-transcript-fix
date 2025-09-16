@@ -205,7 +205,7 @@ export default function AISessionPage({ params }: { params: { sessionId: string 
         backHref="/practice/ai"
       />
 
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-[1600px]">
         
         {/* Progress Steps */}
         <div className="mb-8">

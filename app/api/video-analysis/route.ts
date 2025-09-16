@@ -6,14 +6,13 @@ import { prisma } from '@/lib/prisma';
 import { VideoIntelligenceServiceClient } from '@google-cloud/video-intelligence';
 import { SpeechClient } from '@google-cloud/speech';
 
-// Initialize Google Cloud clients
-const videoClient = new VideoIntelligenceServiceClient({
-  projectId: 'wingman-interview-470419',
-});
+// Ensure this route runs on the Node.js runtime and is dynamic
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
-const speechClient = new SpeechClient({
-  projectId: 'wingman-interview-470419',
-});
+// Initialize Google Cloud clients using Application Default Credentials
+const videoClient = new VideoIntelligenceServiceClient();
+const speechClient = new SpeechClient();
 
 // Enhanced audio extraction function for WEBM files
 async function extractAndTranscribeAudio(videoUri: string) {
@@ -359,8 +358,9 @@ export async function POST(request: NextRequest) {
     }
     // Finally check database session directly if session cookie is present
     else {
-      // Check standard session token first
-      let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+      // Check session token (support secure and non-secure cookie names)
+      let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+        || request.cookies.get('next-auth.session-token')?.value;
       
       // If not found, check for database-specific session token (for hybrid fallback)
       if (!sessionToken) {
@@ -649,8 +649,9 @@ export async function GET(request: NextRequest) {
     }
     // Finally check database session directly if session cookie is present
     else {
-      // Check standard session token first
-      let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+      // Check session token (support secure and non-secure cookie names)
+      let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+        || request.cookies.get('next-auth.session-token')?.value;
       
       // If not found, check for database-specific session token (for hybrid fallback)
       if (!sessionToken) {

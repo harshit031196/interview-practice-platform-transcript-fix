@@ -16,7 +16,8 @@ export async function GET(
     let userId = token?.sub || authSession?.user?.id;
 
     if (!userId) {
-      let sessionToken = request.cookies.get('next-auth.session-token')?.value;
+      let sessionToken = request.cookies.get('__Secure-next-auth.session-token')?.value
+        || request.cookies.get('next-auth.session-token')?.value;
       if (!sessionToken) {
         sessionToken = request.cookies.get('next-auth.database-session')?.value || undefined;
       }

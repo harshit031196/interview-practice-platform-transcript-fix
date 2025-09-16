@@ -82,7 +82,6 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
   const buildNarrativeFromNorm = (d: GeminiFeedback | null): string | null => {
     if (!d) return null
     const lines: string[] = []
-    lines.push(`Overall: ${d.overallScore10}/10 (${d.interviewType || 'general'})`)
     if (d.summary && !isErrorishText(d.summary)) { lines.push('', 'Summary:', String(d.summary)) }
     if (Array.isArray(d.metrics) && d.metrics.length) {
       lines.push('', 'Metrics:')
@@ -100,10 +99,6 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
         const fix = mk.fix ? ` Fix: ${mk.fix}` : ''
         lines.push(`- ${q}${why}${fix}`.trim())
       }
-    }
-    if (Array.isArray(d.nextSteps) && d.nextSteps.length) {
-      lines.push('', 'Next Steps:')
-      for (const s of d.nextSteps.slice(0, 10)) { if (typeof s === 'string') lines.push(`- ${s}`) }
     }
     return lines.join('\n')
   }
@@ -257,10 +252,23 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
         }
       } catch {}
       try {
-        const vr = await fetch(`/api/video-analysis?sessionId=${sessionId}`)
+        const vr = await fetch(`/api/video-analysis/results/${sessionId}`)
         if (mounted && vr.ok) {
-          const arr = await vr.json()
+          const payload = await vr.json()
+          // Normalize to array-of-segments shape expected by downstream code
+          const arr: any[] = Array.isArray(payload) ? payload : [{ results: payload }]
           setVideoData(arr)
+          // Opportunistically compute clarity (0-100) from speech_analysis if not already present
+          try {
+            const latest = arr.length ? arr[arr.length - 1] : null
+            const src = latest?.results ?? latest?.analysisData
+            const obj = typeof src === 'string' ? JSON.parse(src) : (typeof src === 'object' ? src : null)
+            const clarity01 = obj?.speech_analysis?.clarity_score
+            if (typeof clarity01 === 'number' && isFinite(clarity01)) {
+              const clarityPct = Math.round(Math.max(0, Math.min(100, clarity01 * 100)))
+              setVideoNums(prev => ({ ...prev, clarity: clarityPct }))
+            }
+          } catch {}
         }
       } catch {}
     })()
@@ -812,8 +820,15 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
       else if (confAnalysis?.confidence_score != null) confidence = Number(confAnalysis.confidence_score)
       const confidencePct = confidence != null && isFinite(confidence) ? Math.round(Math.max(0, Math.min(100, confidence * (confidence <= 1 ? 100 : 1)))) : null
 
-      // Face count
-      const faceCount = va?.faceDetection?.count != null ? Number(va.faceDetection.count) : null
+      // Face count — fall back to facial_analysis if faceDetection.count not present
+      let faceCount: number | null = null
+      if (va?.faceDetection?.count != null) {
+        faceCount = Number(va.faceDetection.count)
+      } else if ((obj as any)?.facial_analysis?.total_frames_analyzed != null) {
+        faceCount = Number((obj as any).facial_analysis.total_frames_analyzed)
+      } else if (Array.isArray((obj as any)?.facial_analysis?.emotion_timeline)) {
+        faceCount = ((obj as any).facial_analysis.emotion_timeline as any[]).length
+      }
 
       // Eye contact percentage
       let eye = null as number | null
@@ -940,6 +955,13 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
         if (looking.length) eyeContactScore = looking.reduce((a, b) => a + b, 0) / looking.length
         if (smiles.length) smileScore = smiles.reduce((a, b) => a + b, 0) / smiles.length
       }
+      // Fallback expressiveness from facial_analysis.emotion_statistics.joy.average (0..1)
+      if (smileScore == null) {
+        const joyAvg = (obj as any)?.facial_analysis?.emotion_statistics?.joy?.average
+        if (typeof joyAvg === 'number' && isFinite(joyAvg)) {
+          smileScore = joyAvg
+        }
+      }
       // Fallback eye contact from confidence analysis average score (0..1)
       if (eyeContactScore == null && (obj as any).confidence_analysis?.average_eye_contact_score != null) {
         const val = Number((obj as any).confidence_analysis.average_eye_contact_score)
@@ -1024,16 +1046,17 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
         <Card className="border-2 border-purple-200">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <MessageSquare className="w-5 h-5" /> LLM Feedback
+              <MessageSquare className="w-5 h-5" /> SuperAI Feedback
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             {/* High-level numbers */}
             <div className="flex items-center gap-4">
-              {llmOverall10 != null ? (
-                <div className="text-3xl font-bold">{llmOverall10}/10</div>
-              ) : geminiData && (geminiData.overallScore10 ?? 0) > 0 ? (
-                <div className="text-3xl font-bold">{geminiData.overallScore10}/10</div>
+              {(llmOverall10 != null || (geminiData && (geminiData.overallScore10 ?? 0) > 0)) ? (
+                <div className="space-y-1">
+                  <div className="text-xs text-muted-foreground">Overall (Conversation)</div>
+                  <div className="text-3xl font-bold">{(llmOverall10 ?? geminiData?.overallScore10)}/10</div>
+                </div>
               ) : geminiText ? (
                 <div className="text-sm text-muted-foreground">Numeric scores are unavailable. Narrative shown below.</div>
               ) : null}
@@ -1045,6 +1068,21 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
             {/* Metrics grid: clarity, structure, technical depth (if present) */}
             {geminiData && Array.isArray(geminiData.metrics) && geminiData.metrics.length > 0 && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Overall Performance as first metric card */}
+                {(() => {
+                  const overall = (llmOverall10 ?? geminiData?.overallScore10) as number | null;
+                  return (overall != null) ? (
+                    <div key="overall" className="p-3 rounded-md border">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="font-medium flex items-center gap-2">
+                          <BarChart2 className="w-4 h-4" /> Overall Performance
+                        </div>
+                        <Badge>{overall}/10</Badge>
+                      </div>
+                      <Progress value={Math.max(0, Math.min(100, (overall ?? 0) * 10))} />
+                    </div>
+                  ) : null;
+                })()}
                 {geminiData.metrics.map((m, idx) => (
                   <div key={idx} className="p-3 rounded-md border">
                     <div className="flex items-center justify-between mb-2">
@@ -1099,12 +1137,6 @@ export default function FinalAnalysisDashboard({ sessionId, onBack }: FinalAnaly
                 </div>
               </div>
             )}
-            <div className="font-semibold mb-2">Next Steps</div>
-            <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
-              {geminiData && geminiData.nextSteps?.slice(0, 10).map((s, i) => (
-                <li key={i}>{s}</li>
-              ))}
-            </ul>
           </CardContent>
         </Card>
       ) : (

@@ -76,7 +76,7 @@ function ConversationalInterviewContent() {
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
-      <div className="container mx-auto px-4">
+      <div className="mx-auto px-4 max-w-[1600px]">
         <UnifiedInterviewSession
           sessionId={sessionData.id}
           interviewType={sessionData.interviewType}

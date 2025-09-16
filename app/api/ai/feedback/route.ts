@@ -5,16 +5,12 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { VertexAI } from '@google-cloud/vertexai';
  
- export const runtime = 'nodejs';
- export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
-// Initialize Vertex AI
+// Vertex AI project/location config (client will be created lazily inside handlers)
 const PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID || 'wingman-interview-470419';
 const DEFAULT_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
-const vertex_ai = new VertexAI({
-  project: PROJECT_ID,
-  location: DEFAULT_LOCATION,
-});
 
 // Allow overriding model via env vars; try multiple fallbacks if unavailable
 const ENV_MODEL = process.env.VERTEX_GEMINI_MODEL || process.env.GEMINI_MODEL;
@@ -43,6 +39,18 @@ const isModelNotFound = (err: any): boolean => {
   const code = err?.code ?? err?.status;
   const msg = (err?.message || '').toString();
   return code === 404 || /NOT_FOUND/i.test(String(err?.status)) || /was not found|Publisher Model/i.test(msg);
+}
+
+// Determine the effective job role for feedback prompts based on interview type
+function effectiveRoleFromType(interviewType: string, incomingRole?: string): string {
+  const t = (interviewType || '').toLowerCase().replace(/\s+/g, '-');
+  if (t === 'product') return 'Product Manager';
+  if (t === 'technical' || t === 'system-design') return 'Software Engineer';
+  // Behavioral supports both; honor explicit incoming role if provided
+  const r = (incomingRole || '').toLowerCase();
+  if (/product\s*manager|\bpm\b/.test(r)) return 'Product Manager';
+  if (/software\s*(engineer|developer)|\bswe\b|\bsde\b/.test(r)) return 'Software Engineer';
+  return 'Software Engineer or Product Manager';
 }
 
 // Build 5 key metrics expected for different interview types
@@ -142,11 +150,13 @@ export async function POST(request: NextRequest) {
     const { 
       conversationTranscript, 
       conversationHistory = [],
-      jobRole = 'Software Engineer',
+      jobRole: incomingJobRole = 'Software Engineer',
       company = 'FAANG',
       interviewType = 'behavioral',
       sessionId 
     } = body;
+
+    const effectiveJobRole = effectiveRoleFromType(interviewType, incomingJobRole);
 
     // Construct transcript if not provided, using conversationHistory
     let transcriptText: string | null = conversationTranscript || null;
@@ -172,7 +182,7 @@ export async function POST(request: NextRequest) {
 
     // Numbers-only prompt for simplified output
     const metricList = metricNamesForType(interviewType);
-    const systemPrompt = `You are an expert interview coach analyzing a ${interviewType} interview conversation for a ${jobRole} at ${company}.
+    const systemPrompt = `You are an expert interview coach analyzing a ${interviewType} interview conversation for a ${effectiveJobRole} at ${company}.
 
 Return ONLY a strict JSON object (no markdown, no wrapping text) with the following schema:
 {
@@ -192,7 +202,15 @@ Return ONLY a strict JSON object (no markdown, no wrapping text) with the follow
   "nextSteps": [string]
 }
 
-Rules:
+Rules and calibration:
+- Use this scoring rubric for all score10 values (including overall):
+  - 9–10 Outstanding: clear evidence throughout; precise, confident, and complete.
+  - 7–8 Strong: generally clear with minor gaps.
+  - 5–6 Acceptable: mixed but adequate; do not over-penalize minor fillers or brief pauses.
+  - 3–4 Below average: several issues or missing elements.
+  - 0–2 Poor: largely missing, incorrect, or incoherent.
+- Consider interview type (behavioral/technical/system/product) when judging structure and technical depth.
+- Weigh both strengths and weaknesses; if content is limited but not wrong, stay around 5–7 unless clearly poor.
 - Values must be concise but specific to the conversation.
 - Explanations should cite what in the conversation supports the score.
 - Do NOT include any extra keys, text, or markdown fences.
@@ -201,7 +219,7 @@ Rules:
     // Generate AI feedback using Gemini with model fallback
     const generationConfig = {
       maxOutputTokens: 900,
-      temperature: 0.2,
+      temperature: 0.15,
       topP: 0.8,
       // Request JSON for structured analysis
       responseMimeType: 'application/json',
@@ -242,9 +260,7 @@ Rules:
       for (const candidate of MODEL_CANDIDATES) {
         try {
           console.log(`[API] Trying Gemini model: ${candidate} in ${loc}`);
-          const client = loc === DEFAULT_LOCATION
-            ? vertex_ai
-            : new VertexAI({ project: PROJECT_ID, location: loc });
+          const client = new VertexAI({ project: PROJECT_ID, location: loc });
           const generativeModel = client.preview.getGenerativeModel({
             model: candidate,
             generationConfig,
@@ -315,12 +331,12 @@ Rules:
     let analysis = extractJson(aiResponse || '')
     // Strict JSON retry if needed
     if (!analysis) {
-      const strictJsonPrompt = `Return ONLY a strict JSON object with the exact keys: overallScore10, interviewType, metrics, mistakes, summary, nextSteps. No markdown. Metrics must be [{name, score10, explanation}] for: ${metricList.join(', ')}. Score ranges 0-10.`
+      const strictJsonPrompt = `Return ONLY a strict JSON object with the exact keys: overallScore10, interviewType, metrics, mistakes, summary, nextSteps. No markdown. Metrics must be [{name, score10, explanation}] for: ${metricList.join(', ')}. Score ranges 0-10 (integer). Use the same calibration rubric: 9–10 Outstanding, 7–8 Strong, 5–6 Acceptable, 3–4 Below average, 0–2 Poor. Avoid over-penalizing minor fillers.`
       for (const loc of LOCATION_CANDIDATES) {
         for (const candidate of MODEL_CANDIDATES) {
           try {
             console.log(`[API] Strict JSON retry with model ${candidate} in ${loc}`)
-            const client = loc === DEFAULT_LOCATION ? vertex_ai : new VertexAI({ project: PROJECT_ID, location: loc })
+            const client = new VertexAI({ project: PROJECT_ID, location: loc })
             const strictModel = client.preview.getGenerativeModel({
               model: candidate,
               generationConfig: { ...generationConfig, responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 900 },
@@ -379,7 +395,7 @@ Rules:
               processingMetadata: JSON.stringify({
                 model: usedModelName || MODEL_CANDIDATES[0],
                 location: usedLocation || DEFAULT_LOCATION,
-                jobRole,
+                jobRole: effectiveJobRole,
                 company,
                 interviewType,
                 labels: ['Overall', ...metricNamesForType(interviewType)],
@@ -399,7 +415,7 @@ Rules:
               processingMetadata: JSON.stringify({
                 model: usedModelName || MODEL_CANDIDATES[0],
                 location: usedLocation || DEFAULT_LOCATION,
-                jobRole,
+                jobRole: effectiveJobRole,
                 company,
                 interviewType,
                 labels: ['Overall', ...metricNamesForType(interviewType)],
@@ -482,7 +498,7 @@ Rules:
             processingMetadata: JSON.stringify({
               model: usedModelName || MODEL_CANDIDATES[0],
               location: usedLocation || DEFAULT_LOCATION,
-              jobRole,
+              jobRole: effectiveJobRole,
               company,
               interviewType,
               labels: ['Overall', ...metricList],
@@ -502,7 +518,7 @@ Rules:
             processingMetadata: JSON.stringify({
               model: usedModelName || MODEL_CANDIDATES[0],
               location: usedLocation || DEFAULT_LOCATION,
-              jobRole,
+              jobRole: effectiveJobRole,
               company,
               interviewType,
               labels: ['Overall', ...metricList],
@@ -511,7 +527,7 @@ Rules:
               generatedAt: new Date().toISOString()
             })
           }
-        });
+        })
       }
     } catch (dbErr) {
       console.error('[API] Failed to store InterviewFeedback:', dbErr);

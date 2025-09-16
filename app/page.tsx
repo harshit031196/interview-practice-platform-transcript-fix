@@ -123,9 +123,6 @@ export default function LandingPage() {
             <Button size="lg" onClick={() => openAuthModal('signup')} className="text-lg px-8 py-3">
               Start Practicing Free
             </Button>
-            <Button size="lg" variant="outline" onClick={() => openAuthModal('signin')} className="text-lg px-8 py-3">
-              Continue as Guest
-            </Button>
           </div>
         </div>
       </section>
